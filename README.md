@@ -1,88 +1,154 @@
-# Apple Mail MCP Server
+# JXA Mail MCP
 
-An MCP (Model Context Protocol) server that provides fast, programmatic access to Apple Mail via optimized JXA (JavaScript for Automation) scripts.
+A fast MCP (Model Context Protocol) server for Apple Mail, using optimized JXA (JavaScript for Automation) scripts with batch property fetching for **87x faster** performance.
 
 ## Features
 
-- **get_todays_emails** - Fetch all emails received today from any account/mailbox
+- **list_accounts** - List all configured email accounts
+- **list_mailboxes** - List mailboxes for an account
+- **get_emails** - Fetch emails from any mailbox with pagination
+- **get_todays_emails** - Fetch all emails received today
+- **get_unread_emails** - Fetch unread emails
+- **get_flagged_emails** - Fetch flagged emails
 - **search_emails** - Search emails by subject or sender
 
 ## Installation
 
+### With pipx (recommended)
+
+```bash
+pipx install jxa-mail-mcp
+```
+
+### From source
+
 Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone <repo>
-cd apple-mail-mcp-server
+git clone https://github.com/imdinu/jxa-mail-mcp
+cd jxa-mail-mcp
 uv sync
 ```
 
 ## Usage
 
-### Run the MCP server
-
-```bash
-uv run fastmcp run src/apple_mail_mcp_server/server.py
-```
-
 ### Add to Claude Code
 
-```bash
-claude mcp add apple-mail -- uv run --directory /path/to/apple-mail-mcp-server fastmcp run src/apple_mail_mcp_server/server.py
+After installing with pipx:
+
+```json
+{
+  "mcpServers": {
+    "mail": {
+      "command": "jxa-mail-mcp"
+    }
+  }
+}
 ```
 
-### Test directly
+Or from source:
+
+```json
+{
+  "mcpServers": {
+    "mail": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/jxa-mail-mcp", "jxa-mail-mcp"]
+    }
+  }
+}
+```
+
+### Run directly
+
+```bash
+jxa-mail-mcp
+```
+
+### Configuration
+
+Set default account and mailbox via environment variables:
+
+```bash
+export JXA_MAIL_DEFAULT_ACCOUNT="Work"
+export JXA_MAIL_DEFAULT_MAILBOX="Inbox"
+```
+
+Or in Claude Code config:
+
+```json
+{
+  "mcpServers": {
+    "mail": {
+      "command": "jxa-mail-mcp",
+      "env": {
+        "JXA_MAIL_DEFAULT_ACCOUNT": "Work"
+      }
+    }
+  }
+}
+```
+
+### Test in Python
 
 ```python
-from apple_mail_mcp_server.server import get_todays_emails, search_emails
+from jxa_mail_mcp.server import get_todays_emails, search_emails
 
 emails = get_todays_emails(account="iCloud", mailbox="Inbox")
-results = search_emails("meeting", limit=10)
+results = search_emails("meeting", account="Work", limit=10)
 ```
 
-## Performance Philosophy
+## Architecture
+
+```
+src/jxa_mail_mcp/
+├── __init__.py         # Exports mcp instance and main()
+├── server.py           # FastMCP server and MCP tools
+├── config.py           # Environment variable configuration
+├── builders.py         # QueryBuilder for constructing JXA scripts
+├── executor.py         # JXA script execution utilities
+└── jxa/
+    ├── __init__.py     # Exports MAIL_CORE_JS
+    └── mail_core.js    # Shared JXA utilities library
+```
+
+### Design Principles
+
+1. **Separation of concerns**: Python handles logic/types, JavaScript handles Mail.app interaction
+2. **Builder pattern**: `QueryBuilder` constructs optimized JXA scripts programmatically
+3. **Shared JS library**: `mail_core.js` provides reusable utilities injected into all scripts
+4. **Type safety**: Python type hints ensure correct usage
+
+## Performance
 
 ### The Problem
 
-Naive AppleScript/JXA iteration is extremely slow when accessing Apple Mail. A typical approach might look like:
+Naive AppleScript/JXA iteration is extremely slow:
 
 ```javascript
-// SLOW: ~54 seconds for a mailbox with a few hundred messages
+// SLOW: ~54 seconds for a few hundred messages
 for (let msg of inbox.messages()) {
     results.push({
         from: msg.sender(),      // IPC call to Mail.app
         subject: msg.subject(),  // IPC call to Mail.app
-        date: msg.dateReceived() // IPC call to Mail.app
     });
 }
 ```
 
-Each property access (`msg.sender()`, `msg.subject()`, etc.) triggers a separate Apple Event IPC round-trip to Mail.app. With hundreds of messages and multiple properties, this results in thousands of IPC calls.
+Each property access triggers a separate Apple Event IPC round-trip.
 
 ### The Solution: Batch Property Fetching
 
-JXA supports fetching a property from all elements at once, returning an array:
+JXA supports fetching a property from all elements at once:
 
 ```javascript
 // FAST: ~0.6 seconds (87x faster)
 const msgs = inbox.messages;
+const senders = msgs.sender();   // Single IPC call returns array
+const subjects = msgs.subject(); // Single IPC call returns array
 
-// Single IPC call returns array of ALL senders
-const senders = msgs.sender();
-// Single IPC call returns array of ALL subjects
-const subjects = msgs.subject();
-// Single IPC call returns array of ALL dates
-const dates = msgs.dateReceived();
-
-// Now filter in pure JavaScript - no more IPC
-for (let i = 0; i < dates.length; i++) {
-    if (dates[i] >= today) {
-        results.push({
-            from: senders[i],
-            subject: subjects[i],
-            date: dates[i]
-        });
-    }
+for (let i = 0; i < senders.length; i++) {
+    results.push({ from: senders[i], subject: subjects[i] });
 }
 ```
 
@@ -90,42 +156,25 @@ for (let i = 0; i < dates.length; i++) {
 
 | Method | Time | Speedup |
 |--------|------|---------|
-| AppleScript (per-message iteration) | 54.1s | 1x |
-| JXA (per-message iteration) | 53.9s | 1x |
-| **JXA (batch property fetching)** | **0.62s** | **87x** |
-
-The bottleneck is not AppleScript vs JavaScript - it's the number of IPC round-trips. Batch fetching reduces thousands of Apple Event calls to just a handful.
-
-### Why Not Direct SQLite Access?
-
-Apple Mail stores its data in SQLite databases at `~/Library/Mail/V10/MailData/Envelope Index`. Direct database access would be even faster (~50ms), but:
-
-1. Requires **Full Disk Access** permission granted to the terminal
-2. Database schema is undocumented and may change between macOS versions
-3. The scripting bridge is the officially supported API
-
-The batch JXA approach provides an excellent balance: near-instant performance without special permissions or fragile implementation details.
-
-### Key Principles
-
-1. **Minimize IPC calls** - Each Apple Event round-trip has significant overhead
-2. **Batch fetch properties** - Use `collection.property()` syntax to get arrays
-3. **Filter in JavaScript** - Once data is in memory, JS operations are effectively free
-4. **Avoid content fetching** - Email body content is expensive; only fetch when needed
+| AppleScript (per-message) | 54.1s | 1x |
+| JXA (per-message) | 53.9s | 1x |
+| **JXA (batch fetching)** | **0.62s** | **87x** |
 
 ## Development
 
 ```bash
-# Install with dev dependencies
 uv sync
-
-# Run linter
 uv run ruff check src/
-
-# Format code
 uv run ruff format src/
+
+# Test
+uv run python -c "
+from jxa_mail_mcp.server import list_accounts, get_todays_emails
+print('Accounts:', len(list_accounts()))
+print('Today:', len(get_todays_emails()))
+"
 ```
 
 ## License
 
-MIT
+GPL-3.0-or-later

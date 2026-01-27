@@ -1,18 +1,56 @@
 [project]
-name = "apple-mail-mcp-server"
+name = "jxa-mail-mcp"
 version = "0.1.0"
-description = "MCP server for interacting with Apple Mail via JXA scripts"
+description = "Fast MCP server for Apple Mail via optimized JXA scripts"
+readme = "README.md"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.13"
+authors = [
+    { name = "Ioan-Mihail Dinu", email = "iodinu@icloud.com" },
+]
+keywords = [
+    "mcp",
+    "apple-mail",
+    "jxa",
+    "automation",
+    "macos",
+    "email",
+    "model-context-protocol",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: MacOS",
+    "Programming Language :: JavaScript",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Email",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "fastmcp>=3.0.0b1,<4",
     "cyclopts>=5.0.0a1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/imdinu/jxa-mail-mcp"
+Repository = "https://github.com/imdinu/jxa-mail-mcp"
+Issues = "https://github.com/imdinu/jxa-mail-mcp/issues"
+
 [project.scripts]
-apple-mail-mcp = "apple_mail_mcp_server:mcp.run"
+jxa-mail-mcp = "jxa_mail_mcp:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/apple_mail_mcp_server"]
+packages = ["src/jxa_mail_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/"]
+
+[tool.hatch.build]
+# Include .js files in the package
+artifacts = ["src/**/*.js"]
 
 [build-system]
 requires = ["hatchling"]

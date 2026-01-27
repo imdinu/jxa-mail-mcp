@@ -241,5 +241,113 @@ def search_emails(
     return execute_query(q)
 
 
+@mcp.tool
+def fuzzy_search_emails(
+    query: str,
+    account: str | None = None,
+    mailbox: str | None = None,
+    limit: int = 20,
+    threshold: float = 0.3,
+) -> list[dict]:
+    """
+    Fuzzy search for emails using trigram + Levenshtein matching.
+
+    Finds emails even with typos or partial matches. Uses trigrams for
+    fast candidate selection and Levenshtein distance for accurate ranking.
+
+    Args:
+        query: Search term (fuzzy matched against subject and sender)
+        account: Account name. Uses JXA_MAIL_DEFAULT_ACCOUNT env var or
+                 first account if not specified.
+        mailbox: Mailbox name. Uses JXA_MAIL_DEFAULT_MAILBOX env var or
+                 "Inbox" if not specified.
+        limit: Maximum number of results (default: 20)
+        threshold: Minimum similarity score 0-1 (default: 0.3)
+
+    Returns:
+        List of matching emails with similarity scores, sorted by score.
+
+    Example:
+        >>> fuzzy_search_emails("joob descrption")  # typos OK
+        [{"subject": "Job Description", "score": 0.85, ...}, ...]
+    """
+    safe_query = query.replace("\\", "\\\\").replace("'", "\\'")
+    resolved_account = _resolve_account(account)
+    resolved_mailbox = _resolve_mailbox(mailbox)
+
+    # Build account reference
+    if resolved_account:
+        safe_account = resolved_account.replace("'", "\\'")
+        account_js = f"MailCore.getAccount('{safe_account}')"
+    else:
+        account_js = "MailCore.getAccount(null)"
+
+    safe_mailbox = resolved_mailbox.replace("'", "\\'")
+
+    script = f"""
+const account = {account_js};
+const mailbox = MailCore.getMailbox(account, '{safe_mailbox}');
+const msgs = mailbox.messages;
+const query = '{safe_query}';
+const threshold = {threshold};
+
+// Batch fetch properties
+const data = MailCore.batchFetch(msgs, [
+    'id', 'subject', 'sender', 'dateReceived', 'readStatus', 'flaggedStatus'
+]);
+
+const results = [];
+const count = data.id.length;
+
+for (let i = 0; i < count; i++) {{
+    const subject = data.subject[i] || '';
+    const sender = data.sender[i] || '';
+
+    // Try matching against subject and sender
+    const subjectMatch = MailCore.fuzzyMatch(query, subject);
+    const senderMatch = MailCore.fuzzyMatch(query, sender);
+
+    // Take the best match
+    let bestScore = 0;
+    let matchedIn = null;
+    let matchedText = null;
+
+    if (subjectMatch && subjectMatch.score > bestScore) {{
+        bestScore = subjectMatch.score;
+        matchedIn = 'subject';
+        matchedText = subjectMatch.matched;
+    }}
+    if (senderMatch && senderMatch.score > bestScore) {{
+        bestScore = senderMatch.score;
+        matchedIn = 'sender';
+        matchedText = senderMatch.matched;
+    }}
+
+    if (bestScore >= threshold) {{
+        results.push({{
+            id: data.id[i],
+            subject: subject,
+            sender: sender,
+            date_received: MailCore.formatDate(data.dateReceived[i]),
+            read: data.readStatus[i],
+            flagged: data.flaggedStatus[i],
+            score: Math.round(bestScore * 100) / 100,
+            matched_in: matchedIn,
+            matched_text: matchedText
+        }});
+    }}
+}}
+
+// Sort by score descending, then by date
+results.sort((a, b) => {{
+    if (b.score !== a.score) return b.score - a.score;
+    return new Date(b.date_received) - new Date(a.date_received);
+}});
+
+JSON.stringify(results.slice(0, {limit}));
+"""
+    return execute_with_core(script)
+
+
 if __name__ == "__main__":
     mcp.run()

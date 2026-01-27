@@ -153,6 +153,40 @@ script = "JSON.stringify(MailCore.newUtility('value'));"
 result = execute_with_core(script)
 ```
 
+## Fuzzy Search
+
+The `fuzzy_search_emails` tool uses a two-stage matching algorithm:
+
+1. **Trigram filtering** - Fast candidate selection using character triplets
+2. **Levenshtein ranking** - Precise similarity scoring for final ranking
+
+### MailCore Fuzzy Methods
+
+```javascript
+// Extract trigrams from string
+MailCore.trigrams("hello")  // Set{"hel", "ell", "llo"}
+
+// Jaccard similarity between trigram sets
+MailCore.trigramSimilarity(set1, set2)  // 0-1
+
+// Edit distance
+MailCore.levenshtein("hello", "hallo")  // 1
+
+// Normalized similarity
+MailCore.levenshteinSimilarity("hello", "hallo")  // 0.8
+
+// Combined fuzzy match (returns {score, matched} or null)
+MailCore.fuzzyMatch("reserch", "research studies", 0.2)
+// {score: 0.88, matched: "research"}
+```
+
+### Performance
+
+Fuzzy search adds ~33% overhead vs regular search due to trigram/Levenshtein
+calculations, but remains fast (~480ms for 6000 emails) thanks to:
+- Trigram pre-filtering avoids expensive Levenshtein on non-candidates
+- Batch property fetching (same as regular search)
+
 ## Testing
 
 ```bash

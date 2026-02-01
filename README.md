@@ -7,15 +7,27 @@ A fast MCP (Model Context Protocol) server for Apple Mail, using optimized JXA (
 - **list_accounts** - List all configured email accounts
 - **list_mailboxes** - List mailboxes for an account
 - **get_emails** - Fetch emails from any mailbox with pagination
+- **get_email** - Fetch a single email with full body content
 - **get_todays_emails** - Fetch all emails received today
 - **get_unread_emails** - Fetch unread emails
 - **get_flagged_emails** - Fetch flagged emails
 - **search_emails** - Search emails by subject or sender
 - **fuzzy_search_emails** - Typo-tolerant search using trigram + Levenshtein matching
+- **search_email_bodies** - Fuzzy search within email body content
 
 ## Installation
 
-### With pipx (recommended)
+### No installation required
+
+Use `pipx run` to run directly from PyPI:
+
+```bash
+pipx run jxa-mail-mcp
+```
+
+### With pipx (optional)
+
+For faster startup, install globally:
 
 ```bash
 pipx install jxa-mail-mcp
@@ -35,7 +47,20 @@ uv sync
 
 ### Add to Claude Code
 
-After installing with pipx:
+Using `pipx run` (no installation required):
+
+```json
+{
+  "mcpServers": {
+    "mail": {
+      "command": "pipx",
+      "args": ["run", "jxa-mail-mcp"]
+    }
+  }
+}
+```
+
+Or if installed with `pipx install jxa-mail-mcp`:
 
 ```json
 {
@@ -47,22 +72,11 @@ After installing with pipx:
 }
 ```
 
-Or from source:
-
-```json
-{
-  "mcpServers": {
-    "mail": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/jxa-mail-mcp", "jxa-mail-mcp"]
-    }
-  }
-}
-```
-
 ### Run directly
 
 ```bash
+pipx run jxa-mail-mcp
+# or after installing
 jxa-mail-mcp
 ```
 
@@ -93,13 +107,26 @@ Or in Claude Code config:
 ### Test in Python
 
 ```python
-from jxa_mail_mcp.server import get_todays_emails, search_emails, fuzzy_search_emails
+from jxa_mail_mcp.server import (
+    get_todays_emails,
+    search_emails,
+    fuzzy_search_emails,
+    search_email_bodies,
+    get_email,
+)
 
 emails = get_todays_emails(account="iCloud", mailbox="Inbox")
 results = search_emails("meeting", account="Work", limit=10)
 
 # Fuzzy search - tolerates typos
 results = fuzzy_search_emails("meetting nottes", limit=10)  # finds "meeting notes"
+
+# Search within email bodies (slower but searches full content)
+results = search_email_bodies("project deadline", account="Work", limit=10)
+
+# Get full email content
+email = get_email(message_id=12345, account="Work", mailbox="INBOX")
+print(email["content"])  # Full body text
 ```
 
 ## Architecture
@@ -176,6 +203,20 @@ Fuzzy search uses trigrams for fast candidate selection and Levenshtein distance
 The trigram pre-filtering keeps fuzzy search fast by avoiding expensive Levenshtein calculations on non-matching words.
 
 **Example**: Searching for "reserch studies" (typo) correctly finds "research studies" with 0.94 similarity score.
+
+### Body Search Performance
+
+Body search (`search_email_bodies`) fetches full email content, which is slower than metadata-only search but enables searching within email text:
+
+| Search Type | Time (20 emails) | Notes |
+|-------------|------------------|-------|
+| Metadata search | ~0.1s | Subject/sender only |
+| Body search | ~7s | Full content fetch + fuzzy match |
+| Single email fetch | ~0.3s | `get_email()` with full body |
+
+Body search uses a tiered matching approach:
+1. **Exact substring** (score 0.95) - Fast, catches most searches
+2. **Trigram similarity** (score 0.25-0.72) - Tolerates typos without expensive Levenshtein on long text
 
 ## Development
 

@@ -160,6 +160,41 @@ The `fuzzy_search_emails` tool uses a two-stage matching algorithm:
 1. **Trigram filtering** - Fast candidate selection using character triplets
 2. **Levenshtein ranking** - Precise similarity scoring for final ranking
 
+## Body Search
+
+The `search_email_bodies` tool searches within email content using a tiered approach optimized for long text:
+
+1. **Exact substring** (Tier 1) - Fast check, returns score 0.95 with context
+2. **Trigram similarity** (Tier 2) - Tolerates typos without expensive Levenshtein
+
+```python
+@mcp.tool
+def search_email_bodies(
+    query: str,
+    account: str | None = None,
+    mailbox: str | None = None,
+    limit: int = 20,
+    threshold: float = 0.3,
+) -> list[dict]:
+    """Search within email body content using fuzzy matching."""
+```
+
+### get_email Tool
+
+Fetches a single email with full body content:
+
+```python
+@mcp.tool
+def get_email(
+    message_id: int,
+    account: str | None = None,  # Optional hint for faster lookup
+    mailbox: str | None = None,  # Optional hint for faster lookup
+) -> dict:
+    """Get a single email with full content."""
+```
+
+Returns: `id`, `subject`, `sender`, `content`, `date_received`, `date_sent`, `read`, `flagged`, `reply_to`, `message_id`
+
 ### MailCore Fuzzy Methods
 
 ```javascript
@@ -178,6 +213,11 @@ MailCore.levenshteinSimilarity("hello", "hallo")  // 0.8
 // Combined fuzzy match (returns {score, matched} or null)
 MailCore.fuzzyMatch("reserch", "research studies", 0.2)
 // {score: 0.88, matched: "research"}
+
+// Body-optimized fuzzy match (no Levenshtein, faster for long text)
+MailCore.fuzzyMatchBody("unsubscribe", emailBody, 2000)
+// {score: 0.95, matched: "...click to unsubscribe...", tier: "exact"}
+// or {score: 0.43, matched: "unsubscribe", tier: "trigram"}
 ```
 
 ### Performance
@@ -186,6 +226,9 @@ Fuzzy search adds ~33% overhead vs regular search due to trigram/Levenshtein
 calculations, but remains fast (~480ms for 6000 emails) thanks to:
 - Trigram pre-filtering avoids expensive Levenshtein on non-candidates
 - Batch property fetching (same as regular search)
+
+Body search is slower due to content fetching (~7s for 20 emails) but uses
+trigram-only matching (no Levenshtein) on body text to stay responsive.
 
 ## Testing
 

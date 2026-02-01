@@ -349,5 +349,217 @@ JSON.stringify(results.slice(0, {limit}));
     return execute_with_core(script)
 
 
+@mcp.tool
+def search_email_bodies(
+    query: str,
+    account: str | None = None,
+    mailbox: str | None = None,
+    limit: int = 20,
+    threshold: float = 0.3,
+) -> list[dict]:
+    """
+    Search within email body content using fuzzy matching.
+
+    Searches the full text content of emails, not just metadata.
+    Uses a fast two-tier approach: exact substring matching first,
+    then trigram similarity for typo tolerance.
+
+    Note: Slower than metadata-only search due to fetching email bodies.
+    Use search_emails() or fuzzy_search_emails() for faster metadata search.
+
+    Args:
+        query: Search term to find in email bodies
+        account: Account name. Uses JXA_MAIL_DEFAULT_ACCOUNT env var or
+                 first account if not specified.
+        mailbox: Mailbox name. Uses JXA_MAIL_DEFAULT_MAILBOX env var or
+                 "Inbox" if not specified.
+        limit: Maximum number of results (default: 20)
+        threshold: Minimum similarity score 0-1 (default: 0.3)
+
+    Returns:
+        List of matching emails with scores, sorted by relevance.
+        Includes 'matched_in' field indicating where match was found
+        (subject, sender, or body) and 'matched_text' showing the match.
+
+    Example:
+        >>> search_email_bodies("project deadline")
+        [{"subject": "Re: Updates", "score": 0.95, "matched_in": "body",
+          "matched_text": "...project deadline is...", ...}]
+    """
+    safe_query = query.replace("\\", "\\\\").replace("'", "\\'")
+    resolved_account = _resolve_account(account)
+    resolved_mailbox = _resolve_mailbox(mailbox)
+
+    # Build account reference
+    if resolved_account:
+        safe_account = resolved_account.replace("'", "\\'")
+        account_js = f"MailCore.getAccount('{safe_account}')"
+    else:
+        account_js = "MailCore.getAccount(null)"
+
+    safe_mailbox = resolved_mailbox.replace("'", "\\'")
+
+    script = f"""
+const account = {account_js};
+const mailbox = MailCore.getMailbox(account, '{safe_mailbox}');
+const msgs = mailbox.messages;
+const query = '{safe_query}';
+const threshold = {threshold};
+
+// Batch fetch properties INCLUDING content
+const data = MailCore.batchFetch(msgs, [
+    'id', 'subject', 'sender', 'content',
+    'dateReceived', 'readStatus', 'flaggedStatus'
+]);
+
+const results = [];
+const count = data.id.length;
+
+for (let i = 0; i < count; i++) {{
+    const subject = data.subject[i] || '';
+    const sender = data.sender[i] || '';
+    const content = data.content[i] || '';
+
+    // Try matching against subject, sender, and body
+    const subjectMatch = MailCore.fuzzyMatch(query, subject);
+    const senderMatch = MailCore.fuzzyMatch(query, sender);
+    const bodyMatch = MailCore.fuzzyMatchBody(query, content);
+
+    // Take the best match across all fields
+    let bestScore = 0;
+    let matchedIn = null;
+    let matchedText = null;
+
+    if (subjectMatch && subjectMatch.score > bestScore) {{
+        bestScore = subjectMatch.score;
+        matchedIn = 'subject';
+        matchedText = subjectMatch.matched;
+    }}
+    if (senderMatch && senderMatch.score > bestScore) {{
+        bestScore = senderMatch.score;
+        matchedIn = 'sender';
+        matchedText = senderMatch.matched;
+    }}
+    if (bodyMatch && bodyMatch.score > bestScore) {{
+        bestScore = bodyMatch.score;
+        matchedIn = 'body';
+        matchedText = bodyMatch.matched;
+    }}
+
+    if (bestScore >= threshold) {{
+        results.push({{
+            id: data.id[i],
+            subject: subject,
+            sender: sender,
+            date_received: MailCore.formatDate(data.dateReceived[i]),
+            read: data.readStatus[i],
+            flagged: data.flaggedStatus[i],
+            score: Math.round(bestScore * 100) / 100,
+            matched_in: matchedIn,
+            matched_text: matchedText
+        }});
+    }}
+}}
+
+// Sort by score descending, then by date
+results.sort((a, b) => {{
+    if (b.score !== a.score) return b.score - a.score;
+    return new Date(b.date_received) - new Date(a.date_received);
+}});
+
+JSON.stringify(results.slice(0, {limit}));
+"""
+    return execute_with_core(script)
+
+
+@mcp.tool
+def get_email(
+    message_id: int,
+    account: str | None = None,
+    mailbox: str | None = None,
+) -> dict:
+    """
+    Get a single email with full content.
+
+    Retrieves complete email details including the full body text.
+    Use this after finding an email via search to read its content.
+
+    Args:
+        message_id: The email's unique ID (from search results)
+        account: Account name (optional, helps find message faster)
+        mailbox: Mailbox name (optional, helps find message faster)
+
+    Returns:
+        Email dictionary with full content including:
+        - id, subject, sender, date_received, date_sent
+        - content: Full plain text body
+        - read, flagged status
+        - reply_to, message_id (email Message-ID header)
+
+    Example:
+        >>> get_email(12345)
+        {"id": 12345, "subject": "Meeting notes",
+         "content": "Hi team,\\n\\nHere are the notes...", ...}
+    """
+    resolved_account = _resolve_account(account)
+    resolved_mailbox = _resolve_mailbox(mailbox)
+
+    # Build account reference
+    if resolved_account:
+        safe_account = resolved_account.replace("'", "\\'")
+        account_js = f"MailCore.getAccount('{safe_account}')"
+    else:
+        account_js = "MailCore.getAccount(null)"
+
+    safe_mailbox = resolved_mailbox.replace("'", "\\'")
+
+    script = f"""
+const targetId = {message_id};
+
+// Try to find the message in the specified mailbox first
+let msg = null;
+const account = {account_js};
+const mailbox = MailCore.getMailbox(account, '{safe_mailbox}');
+
+// Search in specified mailbox
+const ids = mailbox.messages.id();
+const idx = ids.indexOf(targetId);
+if (idx !== -1) {{
+    msg = mailbox.messages[idx];
+}}
+
+// If not found, search all mailboxes in the account
+if (!msg) {{
+    const allMailboxes = account.mailboxes();
+    for (let i = 0; i < allMailboxes.length && !msg; i++) {{
+        const mb = allMailboxes[i];
+        const mbIds = mb.messages.id();
+        const mbIdx = mbIds.indexOf(targetId);
+        if (mbIdx !== -1) {{
+            msg = mb.messages[mbIdx];
+        }}
+    }}
+}}
+
+if (!msg) {{
+    throw new Error('Message not found with ID: ' + targetId);
+}}
+
+JSON.stringify({{
+    id: msg.id(),
+    subject: msg.subject(),
+    sender: msg.sender(),
+    content: msg.content(),
+    date_received: MailCore.formatDate(msg.dateReceived()),
+    date_sent: MailCore.formatDate(msg.dateSent()),
+    read: msg.readStatus(),
+    flagged: msg.flaggedStatus(),
+    reply_to: msg.replyTo(),
+    message_id: msg.messageId()
+}});
+"""
+    return execute_with_core(script)
+
+
 if __name__ == "__main__":
     mcp.run()

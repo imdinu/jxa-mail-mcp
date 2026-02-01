@@ -291,4 +291,72 @@ const MailCore = {
         }
         return null;
     },
+
+    /**
+     * Fast body search - optimized for long text.
+     * Uses substring match first, then trigram-only (skips expensive Levenshtein).
+     *
+     * @param {string} query - Search query
+     * @param {string} body - Email body content
+     * @param {number} maxChars - Max characters to search (default 2000)
+     * @returns {object|null} {score, matched, tier} or null if no match
+     */
+    fuzzyMatchBody(query, body, maxChars = 2000) {
+        const q = (query || "").toLowerCase().trim();
+        const b = (body || "").toLowerCase().substring(0, maxChars);
+
+        if (!q || !b) return null;
+
+        // Tier 1: Exact substring match (fastest, best result)
+        const exactIndex = b.indexOf(q);
+        if (exactIndex !== -1) {
+            // Extract context around the match
+            const start = Math.max(0, exactIndex - 20);
+            const end = Math.min(b.length, exactIndex + q.length + 20);
+            const context = b.substring(start, end).trim();
+            return { score: 0.95, matched: context, tier: "exact" };
+        }
+
+        // Tier 2: Word-level trigram matching (no Levenshtein)
+        // Find words that share enough trigrams with query
+        const queryTrigrams = this.trigrams(q);
+        const words = b.split(/\s+/);
+        let bestSim = 0;
+        let bestWord = null;
+
+        for (const word of words) {
+            if (word.length < 2) continue;
+            const wordTrigrams = this.trigrams(word);
+            const sim = this.trigramSimilarity(queryTrigrams, wordTrigrams);
+            if (sim > bestSim) {
+                bestSim = sim;
+                bestWord = word;
+            }
+        }
+
+        // Also check multi-word phrases for multi-word queries
+        const queryWords = q.split(/\s+/).length;
+        if (queryWords > 1 && words.length >= queryWords) {
+            for (let i = 0; i <= words.length - queryWords; i++) {
+                const phrase = words.slice(i, i + queryWords).join(" ");
+                const phraseTrigrams = this.trigrams(phrase);
+                const sim = this.trigramSimilarity(queryTrigrams, phraseTrigrams);
+                if (sim > bestSim) {
+                    bestSim = sim;
+                    bestWord = phrase;
+                }
+            }
+        }
+
+        // Require higher threshold for trigram-only matching
+        if (bestSim >= 0.25) {
+            return {
+                score: Math.round(bestSim * 0.85 * 100) / 100,
+                matched: bestWord,
+                tier: "trigram",
+            };
+        }
+
+        return null;
+    },
 };

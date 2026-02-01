@@ -1,6 +1,6 @@
 [project]
 name = "jxa-mail-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast MCP server for Apple Mail via optimized JXA scripts"
 readme = "README.md"
 license = "GPL-3.0-or-later"

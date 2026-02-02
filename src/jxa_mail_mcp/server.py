@@ -548,13 +548,16 @@ async def search_email_bodies(
     resolved_mailbox = _resolve_mailbox(mailbox)
 
     # Try using the FTS5 index for fast search
+    # NOTE: Index stores account UUIDs from disk paths, not JXA friendly names.
+    # We skip account/mailbox filtering to search across all indexed emails.
+    # TODO: Map UUIDs to friendly names during indexing for proper filtering.
     if use_index:
         manager = _get_index_manager()
         if manager.has_index():
             results = manager.search(
                 query,
-                account=resolved_account,
-                mailbox=resolved_mailbox if mailbox else None,
+                account=None,  # Skip filter - UUID vs name mismatch
+                mailbox=None,  # Skip filter - index uses folder names
                 limit=limit,
             )
             # Convert SearchResult objects to dicts matching JXA output format

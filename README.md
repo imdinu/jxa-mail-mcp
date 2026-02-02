@@ -329,6 +329,12 @@ jxa-mail-mcp rebuild
 
 **Workaround:** Use `--watch` flag which monitors the filesystem and handles deletions in real-time.
 
+### FTS5 search ignores account/mailbox filters
+
+Body search via `search_email_bodies()` currently searches **all indexed emails** regardless of account/mailbox parameters. This is because the disk indexer stores account UUIDs from folder paths, while JXA returns friendly names (e.g., "iCloud"). The mismatch prevents filtering.
+
+**Impact:** Search results may include emails from all accounts, not just the specified one.
+
 ## Troubleshooting
 
 ### ModuleNotFoundError after install

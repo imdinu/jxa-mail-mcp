@@ -95,6 +95,18 @@ const MailCore = {
     },
 
     /**
+     * Get a date N days ago at midnight for filtering.
+     * @param {number} days - Number of days ago
+     * @returns {Date} Date at 00:00:00 N days ago
+     */
+    daysAgo(days) {
+        const d = new Date();
+        d.setDate(d.getDate() - days);
+        d.setHours(0, 0, 0, 0);
+        return d;
+    },
+
+    /**
      * Format a date for JSON output.
      * @param {Date} date - Date to format
      * @returns {string} ISO string or null if invalid

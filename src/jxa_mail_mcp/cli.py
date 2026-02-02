@@ -57,15 +57,15 @@ def _progress_bar(current: int, total: int | None, width: int = 40) -> str:
     return f"[{bar}] {pct * 100:.0f}%"
 
 
-def _run_serve(watch: bool = False, no_sync: bool = False) -> None:
+def _run_serve(watch: bool = False) -> None:
     """Internal function to run the MCP server."""
-    # Perform startup sync if index exists
+    # Perform startup sync if index exists (disk-based, fast)
     from .index import IndexManager
     from .server import mcp
 
     manager = IndexManager.get_instance()
 
-    if manager.has_index() and not no_sync:
+    if manager.has_index():
         try:
             print("Syncing index...", file=sys.stderr, flush=True)
             start = time.time()
@@ -73,7 +73,12 @@ def _run_serve(watch: bool = False, no_sync: bool = False) -> None:
             elapsed = time.time() - start
             if count > 0:
                 print(
-                    f"Synced {count} new emails in {_format_time(elapsed)}",
+                    f"Synced {count} changes in {_format_time(elapsed)}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Index up to date ({_format_time(elapsed)})",
                     file=sys.stderr,
                 )
         except Exception as e:
@@ -112,13 +117,6 @@ def serve(
             help="Watch for new emails and update index in real-time",
         ),
     ] = False,
-    no_sync: Annotated[
-        bool,
-        cyclopts.Parameter(
-            name=["--no-sync"],
-            help="Skip startup index sync (faster startup)",
-        ),
-    ] = False,
     verbose: Annotated[
         bool,
         cyclopts.Parameter(
@@ -133,10 +131,11 @@ def serve(
     This is the default command when no subcommand is specified.
     The server provides email search and access tools to MCP clients.
 
+    At startup, the index is automatically synced with disk (fast, <5s).
     Use --watch to enable real-time index updates when emails arrive.
     Requires Full Disk Access for the terminal.
     """
-    _run_serve(watch=watch, no_sync=no_sync)
+    _run_serve(watch=watch)
 
 
 @app.command
@@ -348,13 +347,6 @@ def default_handler(
             help="Watch for new emails and update index in real-time",
         ),
     ] = False,
-    no_sync: Annotated[
-        bool,
-        cyclopts.Parameter(
-            name=["--no-sync"],
-            help="Skip startup index sync (faster startup)",
-        ),
-    ] = False,
     verbose: Annotated[
         bool,
         cyclopts.Parameter(
@@ -364,7 +356,7 @@ def default_handler(
     ] = False,
 ) -> None:
     """Run the MCP server (default when no command specified)."""
-    _run_serve(watch=watch, no_sync=no_sync)
+    _run_serve(watch=watch)
 
 
 def main() -> None:

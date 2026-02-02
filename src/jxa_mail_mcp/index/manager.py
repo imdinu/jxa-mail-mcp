@@ -228,6 +228,7 @@ class IndexManager:
                         email.get("sender", ""),
                         email.get("content", ""),
                         email.get("date_received", ""),
+                        email.get("emlx_path", ""),  # Store path for disk sync
                     )
                 )
 
@@ -303,20 +304,37 @@ class IndexManager:
 
     def sync_updates(self, progress_callback: callable | None = None) -> int:
         """
-        Sync new emails via JXA.
+        Sync index with disk using state reconciliation.
 
-        This is much faster than build_from_disk() but only fetches
-        emails not already in the index. Use at server startup.
+        Compares the filesystem with the database to detect:
+        - New emails (on disk, not in DB)
+        - Deleted emails (in DB, not on disk)
+        - Moved emails (same ID, different path)
+
+        This is much faster than the old JXA-based sync (~30x faster)
+        and handles deletions correctly.
 
         Args:
             progress_callback: Optional callback(current, total, message)
 
         Returns:
-            Number of new emails synced
+            Number of changes (added + deleted + moved)
         """
-        from .sync import sync_by_date
+        from .disk import find_mail_directory
+        from .sync import sync_from_disk
 
-        return sync_by_date(self._get_conn(), progress_callback)
+        try:
+            mail_dir = find_mail_directory()
+        except (FileNotFoundError, PermissionError) as e:
+            logger.warning("Cannot access mail directory for sync: %s", e)
+            return 0
+
+        result = sync_from_disk(
+            self._get_conn(),
+            mail_dir,
+            progress_callback,
+        )
+        return result.total_changes
 
     def search(
         self,

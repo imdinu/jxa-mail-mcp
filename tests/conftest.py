@@ -7,18 +7,25 @@ from pathlib import Path
 
 import pytest
 
-from jxa_mail_mcp.index.schema import get_schema_sql
+from jxa_mail_mcp.index.schema import (
+    INSERT_EMAIL_SQL,
+    SCHEMA_VERSION,
+    get_schema_sql,
+)
 
 
 @pytest.fixture
-def temp_db() -> sqlite3.Connection:
+def temp_db():
     """Create an in-memory database with the schema."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(get_schema_sql())
-    conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+    conn.execute(
+        "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
     conn.commit()
-    return conn
+    yield conn
+    conn.close()
 
 
 @pytest.fixture
@@ -72,24 +79,25 @@ def sample_emails() -> list[dict]:
 
 @pytest.fixture
 def populated_db(temp_db: sqlite3.Connection, sample_emails: list[dict]):
-    """Database with sample emails inserted."""
-    sql = """INSERT INTO emails
-        (message_id, account, mailbox, subject, sender, content, date_received)
-        VALUES (?, ?, ?, ?, ?, ?, ?)"""
+    """Database with sample emails inserted.
 
+    Uses INSERT_EMAIL_SQL from schema.py to ensure consistency with
+    production code. The sample_emails fixture uses 'message_id' key
+    while email_to_row() expects 'id', so we adapt here.
+    """
     for email in sample_emails:
-        temp_db.execute(
-            sql,
-            (
-                email["message_id"],
-                email["account"],
-                email["mailbox"],
-                email["subject"],
-                email["sender"],
-                email["content"],
-                email["date_received"],
-            ),
+        # Adapt fixture format to match email_to_row() expectations
+        row = (
+            email["message_id"],  # message_id
+            email["account"],  # account
+            email["mailbox"],  # mailbox
+            email["subject"],  # subject
+            email["sender"],  # sender
+            email["content"],  # content
+            email["date_received"],  # date_received
+            None,  # emlx_path (not used in test fixtures)
         )
+        temp_db.execute(INSERT_EMAIL_SQL, row)
     temp_db.commit()
 
     # Rebuild FTS index

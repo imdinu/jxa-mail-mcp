@@ -423,7 +423,7 @@ def scan_all_emails(mail_dir: Path) -> Iterator[dict]:
 
     Yields:
         Email dicts with: id, account, mailbox, subject, sender,
-        content, date_received
+        content, date_received, emlx_path
     """
     # First, try to read metadata from Envelope Index
     try:
@@ -455,7 +455,44 @@ def scan_all_emails(mail_dir: Path) -> Iterator[dict]:
             "sender": parsed.sender or meta.get("sender", ""),
             "content": parsed.content,
             "date_received": meta.get("date_received") or parsed.date_received,
+            "emlx_path": str(emlx_path),
         }
+
+
+def get_disk_inventory(mail_dir: Path) -> dict[tuple[str, str, int], str]:
+    """
+    Fast inventory of all emails on disk WITHOUT parsing content.
+
+    This walks the filesystem and extracts (account, mailbox, message_id)
+    from file paths. Much faster than scan_all_emails() since it doesn't
+    read file content.
+
+    Path structure:
+        V10/[account-uuid]/[mailbox].mbox/Data/.../Messages/[id].emlx
+
+    Args:
+        mail_dir: Path to ~/Library/Mail/V10/
+
+    Returns:
+        Dict mapping (account, mailbox, msg_id) -> emlx_path string
+    """
+    inventory: dict[tuple[str, str, int], str] = {}
+
+    for emlx_path in scan_emlx_files(mail_dir):
+        try:
+            # Extract message ID from filename (e.g., "12345.emlx" -> 12345)
+            msg_id = int(emlx_path.stem)
+
+            # Infer account/mailbox from path
+            account, mailbox = _infer_account_mailbox(emlx_path, mail_dir)
+
+            inventory[(account, mailbox, msg_id)] = str(emlx_path)
+
+        except (ValueError, AttributeError):
+            # Skip files with non-numeric names
+            continue
+
+    return inventory
 
 
 def _infer_account_mailbox(emlx_path: Path, mail_dir: Path) -> tuple[str, str]:

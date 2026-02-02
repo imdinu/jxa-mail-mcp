@@ -30,7 +30,7 @@ def get_default_mailbox() -> str:
     Returns:
         Mailbox name.
     """
-    return os.environ.get("JXA_MAIL_DEFAULT_MAILBOX", "Inbox")
+    return os.environ.get("JXA_MAIL_DEFAULT_MAILBOX", "INBOX")
 
 
 # ========== Index Configuration ==========

@@ -5,27 +5,40 @@
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://www.apple.com/macos/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![Coverage](https://img.shields.io/badge/coverage-52%25-yellow.svg)](https://github.com/imdinu/jxa-mail-mcp)
 
 A fast MCP (Model Context Protocol) server for Apple Mail, using optimized JXA (JavaScript for Automation) scripts with batch property fetching for **87x faster** performance, plus an optional **FTS5 search index** for **700-3500x faster** body search (~2ms vs ~7s).
 
 ## Features
 
-### Email Tools
-- **list_accounts** - List all configured email accounts
-- **list_mailboxes** - List mailboxes for an account
-- **get_emails** - Fetch emails from any mailbox with pagination
-- **get_email** - Fetch a single email with full body content
-- **get_todays_emails** - Fetch all emails received today
-- **get_unread_emails** - Fetch unread emails
-- **get_flagged_emails** - Fetch flagged emails
-- **search_emails** - Search emails by subject or sender
-- **fuzzy_search_emails** - Typo-tolerant search using trigram + Levenshtein matching
-- **search_email_bodies** - Full-text search within email bodies (~100x faster with index)
+### Email Tools (5 total)
 
-### Index Tools
-- **index_status** - Get FTS5 index statistics
-- **sync_index** - Sync new emails to the index
-- **rebuild_index** - Force rebuild the index from disk
+| Tool | Purpose | Parameters |
+|------|---------|------------|
+| `list_accounts()` | List email accounts | - |
+| `list_mailboxes(account?)` | List mailboxes | account (optional) |
+| `get_emails(...)` | Unified email listing | account?, mailbox?, filter?, limit? |
+| `get_email(id)` | Get single email with content | message_id |
+| `search(query, ...)` | Unified search with FTS5 | query, scope?, limit? |
+
+### Unified `get_emails()` Filters
+
+```python
+get_emails()                      # All emails (default)
+get_emails(filter="unread")       # Unread emails only
+get_emails(filter="flagged")      # Flagged emails only
+get_emails(filter="today")        # Emails received today
+get_emails(filter="this_week")    # Emails from last 7 days
+```
+
+### Unified `search()` Scopes
+
+```python
+search("invoice")                          # Search everywhere (uses FTS5)
+search("john@example.com", scope="sender") # Sender only
+search("meeting notes", scope="subject")   # Subject only
+search("deadline", scope="body")           # Body content only
+```
 
 ## Installation
 
@@ -92,7 +105,6 @@ Once configured, you can search emails, get today's messages, find unread emails
 jxa-mail-mcp            # Run MCP server (default)
 jxa-mail-mcp serve      # Run MCP server explicitly
 jxa-mail-mcp --watch    # Run with real-time index updates
-jxa-mail-mcp --no-sync  # Skip startup sync (faster startup)
 jxa-mail-mcp index      # Build search index from disk
 jxa-mail-mcp status     # Show index statistics
 jxa-mail-mcp rebuild    # Force rebuild index
@@ -117,7 +129,7 @@ The file watcher monitors `~/Library/Mail/V10/` for `.emlx` changes and updates 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `JXA_MAIL_DEFAULT_ACCOUNT` | First account | Default email account |
-| `JXA_MAIL_DEFAULT_MAILBOX` | `Inbox` | Default mailbox |
+| `JXA_MAIL_DEFAULT_MAILBOX` | `INBOX` | Default mailbox |
 | `JXA_MAIL_INDEX_PATH` | `~/.jxa-mail-mcp/index.db` | Index database location |
 | `JXA_MAIL_INDEX_MAX_EMAILS` | `5000` | Max emails per mailbox to index |
 | `JXA_MAIL_INDEX_STALENESS_HOURS` | `24` | Hours before index is stale |
@@ -139,13 +151,13 @@ The file watcher monitors `~/Library/Mail/V10/` for `.emlx` changes and updates 
 
 ## FTS5 Search Index
 
-The FTS5 index makes `search_email_bodies()` ~100x faster by pre-indexing email content.
+The FTS5 index makes `search()` ~100x faster by pre-indexing email content.
 
 ### How It Works
 
 1. **Build from disk**: `jxa-mail-mcp index` reads `.emlx` files directly (~30x faster than JXA)
-2. **Startup sync**: New emails are synced via JXA when the server starts
-3. **Real-time updates**: `--watch` flag enables file watcher for automatic index updates
+2. **Startup sync**: Index is synced with disk when server starts (fast, <5s)
+3. **Real-time updates**: `--watch` flag enables file watcher for automatic updates
 4. **Fast search**: Queries use SQLite FTS5 with BM25 ranking
 
 ### Requirements
@@ -156,15 +168,15 @@ Building the index requires **Full Disk Access** for Terminal:
 3. Add and enable **Terminal.app** (or your terminal emulator)
 4. Restart terminal
 
-The MCP server itself does NOT need Full Disk Access (uses JXA for syncing).
+The MCP server itself does NOT need Full Disk Access (uses disk sync).
 
 ### Performance Comparison
 
 | Operation | Without Index | With Index | Speedup |
 |-----------|---------------|------------|---------|
 | Body search | ~7,000ms | ~2-10ms | **700-3500x** |
+| Startup sync | **60s timeout** | <5s | **12x** |
 | Initial index build | N/A | ~1-2 min | One-time |
-| Startup sync | N/A | ~1-2s | Incremental |
 | Index size | N/A | ~6 KB/email | - |
 
 #### Real-World Benchmarks (22,696 emails)
@@ -182,16 +194,16 @@ The MCP server itself does NOT need Full Disk Access (uses JXA for syncing).
 src/jxa_mail_mcp/
 ├── __init__.py         # CLI entry point
 ├── cli.py              # CLI commands (index, status, rebuild)
-├── server.py           # FastMCP server and MCP tools
+├── server.py           # FastMCP server and MCP tools (5 tools)
 ├── config.py           # Environment variable configuration
 ├── builders.py         # QueryBuilder for constructing JXA scripts
 ├── executor.py         # Async JXA script execution utilities
 ├── index/              # FTS5 search index module
 │   ├── __init__.py     # Exports IndexManager
-│   ├── schema.py       # SQLite schema, migrations, and utilities
+│   ├── schema.py       # SQLite schema, migrations (v3)
 │   ├── manager.py      # IndexManager class
-│   ├── disk.py         # Direct .emlx file reading
-│   ├── sync.py         # JXA-based incremental sync
+│   ├── disk.py         # Direct .emlx file reading + inventory
+│   ├── sync.py         # Disk-based state reconciliation
 │   ├── search.py       # FTS5 search functions
 │   └── watcher.py      # Real-time file watcher
 └── jxa/
@@ -201,11 +213,11 @@ src/jxa_mail_mcp/
 
 ### Design Principles
 
-1. **Separation of concerns**: Python handles logic/types, JavaScript handles Mail.app interaction
-2. **Builder pattern**: `QueryBuilder` constructs optimized JXA scripts programmatically
-3. **Shared JS library**: `mail_core.js` provides reusable utilities injected into all scripts
-4. **Hybrid indexing**: Disk reading for speed, JXA for incremental updates
-5. **Async execution**: All JXA calls use `asyncio.create_subprocess_exec` for non-blocking I/O
+1. **Disk-first sync**: Fast filesystem scanning instead of slow JXA queries
+2. **Consolidated tools**: 5 focused tools instead of 13 redundant ones
+3. **Builder pattern**: `QueryBuilder` constructs optimized JXA scripts
+4. **Hybrid indexing**: Disk reading for speed, state reconciliation for sync
+5. **Async execution**: All JXA calls use `asyncio.create_subprocess_exec`
 6. **Type safety**: Python type hints and TypedDict for clear API contracts
 
 ### Hybrid Access Pattern
@@ -213,8 +225,8 @@ src/jxa_mail_mcp/
 | Access Method | Use Case | Latency | When Used |
 |---------------|----------|---------|-----------|
 | **JXA (Live)** | Real-time ops, small queries | ~100-300ms | `get_email()`, `list_mailboxes()` |
-| **FTS5 (Cached)** | Body search, complex filtering | ~2-10ms | `search_email_bodies()` |
-| **Disk (Batch)** | Initial indexing | ~15ms/100 emails | `jxa-mail-mcp index` |
+| **FTS5 (Cached)** | Body search, complex filtering | ~2-10ms | `search()` |
+| **Disk (Batch)** | Initial indexing, sync | ~15ms/100 emails | `jxa-mail-mcp index`, startup |
 
 ## Performance
 
@@ -237,26 +249,12 @@ const subjects = msgs.subject(); // Single IPC call returns array
 | JXA (per-message) | 53.9s | 1x |
 | **JXA (batch fetching)** | **0.62s** | **87x** |
 
-### Body Search with FTS5 Index
+### Disk-First Sync (12x faster)
 
-| Search Type | Without Index | With Index | Speedup |
-|-------------|---------------|------------|---------|
-| Body search | ~7,000ms | ~2-10ms | **700-3500x** |
-| Metadata search | ~100ms | ~100ms | - |
-
-The FTS5 index uses:
-- **Porter stemmer**: "meeting" matches "meetings", "met"
-- **BM25 ranking**: Results sorted by relevance (term frequency × inverse document frequency)
-- **External content table**: Shares storage with main emails table for efficiency
-
-### Fuzzy Search Performance
-
-Fuzzy search uses trigrams for fast candidate selection and Levenshtein distance for accurate ranking:
-
-| Search Type | Time (~6,000 emails) |
-|-------------|---------------------|
-| Regular search | ~360ms |
-| Fuzzy search | ~480ms (+33%) |
+| Sync Method | Time | Status |
+|-------------|------|--------|
+| JXA date-based (old) | **60s timeout** | ❌ |
+| **Disk state reconciliation** | **<5s** | ✅ |
 
 ## Development
 
@@ -274,9 +272,9 @@ uv run pytest -v
 # Manual test
 uv run python -c "
 import asyncio
-from jxa_mail_mcp.server import list_accounts, get_todays_emails
+from jxa_mail_mcp.server import list_accounts, get_emails
 print('Accounts:', len(asyncio.run(list_accounts())))
-print('Today:', len(asyncio.run(get_todays_emails())))
+print('Emails:', len(asyncio.run(get_emails(filter='today'))))
 "
 
 # Test index
@@ -319,19 +317,9 @@ This is **harmless** - BeautifulSoup's HTML parser handles the XML plist metadat
 pip install lxml
 ```
 
-### Deleted emails not removed from index
-
-The fast startup sync only detects **new** emails, not deletions. Deleted emails remain searchable until you run:
-
-```bash
-jxa-mail-mcp rebuild
-```
-
-**Workaround:** Use `--watch` flag which monitors the filesystem and handles deletions in real-time.
-
 ### FTS5 search ignores account/mailbox filters
 
-Body search via `search_email_bodies()` currently searches **all indexed emails** regardless of account/mailbox parameters. This is because the disk indexer stores account UUIDs from folder paths, while JXA returns friendly names (e.g., "iCloud"). The mismatch prevents filtering.
+Body search via `search()` currently searches **all indexed emails** regardless of account/mailbox parameters. This is because the disk indexer stores account UUIDs from folder paths, while JXA returns friendly names (e.g., "iCloud"). The mismatch prevents filtering.
 
 **Impact:** Search results may include emails from all accounts, not just the specified one.
 
@@ -355,6 +343,36 @@ data files. Grant access in:
 **System Settings → Privacy & Security → Full Disk Access → Add Terminal**
 
 Then restart your terminal.
+
+## Migration from v0.3.x
+
+v0.4.0 introduces breaking changes to consolidate the API:
+
+### Removed Tools → Replacements
+
+| Old Tool | New Usage |
+|----------|-----------|
+| `get_todays_emails()` | `get_emails(filter="today")` |
+| `get_unread_emails()` | `get_emails(filter="unread")` |
+| `get_flagged_emails()` | `get_emails(filter="flagged")` |
+| `search_emails()` | `search()` |
+| `fuzzy_search_emails()` | `search()` |
+| `search_email_bodies()` | `search()` |
+| `index_status()` | CLI: `jxa-mail-mcp status` |
+| `sync_index()` | Automatic at startup |
+| `rebuild_index()` | CLI: `jxa-mail-mcp rebuild` |
+
+### Schema Migration
+
+After upgrading, rebuild the index to populate the new `emlx_path` column:
+
+```bash
+jxa-mail-mcp rebuild
+```
+
+### Removed CLI Flag
+
+The `--no-sync` flag has been removed since disk-based sync is now fast (<5s).
 
 ## License
 

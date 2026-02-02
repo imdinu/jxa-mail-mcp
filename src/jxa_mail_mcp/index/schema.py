@@ -17,7 +17,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Current schema version for migrations
-SCHEMA_VERSION = 2  # Bumped for composite key fix
+SCHEMA_VERSION = 3  # Bumped for emlx_path column (disk-first sync)
 
 # Default PRAGMAs for all connections (centralized to avoid drift)
 DEFAULT_PRAGMAS = {
@@ -29,25 +29,27 @@ DEFAULT_PRAGMAS = {
 # Centralized SQL for email insertion (used by manager, sync, watcher)
 # Uses INSERT OR REPLACE for idempotent upserts on composite key
 INSERT_EMAIL_SQL = """INSERT OR REPLACE INTO emails
-    (message_id, account, mailbox, subject, sender, content, date_received)
-    VALUES (?, ?, ?, ?, ?, ?, ?)"""
+    (message_id, account, mailbox, subject, sender, content, date_received,
+     emlx_path)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 def email_to_row(
-    email: dict, account: str, mailbox: str
-) -> tuple[int, str, str, str, str, str, str]:
+    email: dict, account: str, mailbox: str, emlx_path: str | None = None
+) -> tuple[int, str, str, str, str, str, str, str | None]:
     """
     Convert an email dict to a database row tuple.
 
     Centralizes field extraction to ensure consistency across:
     - manager.py (disk indexing)
-    - sync.py (JXA incremental sync)
+    - sync.py (disk-based sync)
     - watcher.py (real-time file watching)
 
     Args:
         email: Email dict with id, subject, sender, content, date_received
         account: Account name/identifier
         mailbox: Mailbox name
+        emlx_path: Path to the .emlx file on disk (for disk-first sync)
 
     Returns:
         Tuple matching INSERT_EMAIL_SQL parameter order
@@ -60,6 +62,7 @@ def email_to_row(
         email.get("sender", ""),
         email.get("content", ""),
         email.get("date_received", ""),
+        emlx_path,
     )
 
 
@@ -106,6 +109,7 @@ CREATE TABLE IF NOT EXISTS emails (
     sender TEXT,
     content TEXT,                    -- Body text
     date_received TEXT,
+    emlx_path TEXT,                  -- Path to .emlx file (for disk-first sync)
     indexed_at TEXT DEFAULT (datetime('now')),
     UNIQUE(account, mailbox, message_id)  -- Composite uniqueness
 );
@@ -117,6 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_emails_date
     ON emails(date_received DESC);
 CREATE INDEX IF NOT EXISTS idx_emails_message_id
     ON emails(message_id);
+CREATE INDEX IF NOT EXISTS idx_emails_path
+    ON emails(emlx_path);
 
 -- FTS5 index (external content - shares storage with emails table)
 -- Uses porter stemmer for English + unicode61 for international text
@@ -252,6 +258,23 @@ def _run_migrations(
 
         # Recreate with new schema
         conn.executescript(get_schema_sql())
+
+    if from_version < 3:
+        # Migration from v2 to v3: Add emlx_path column for disk-first sync
+        logger.info("Migrating schema v2→v3: adding emlx_path column")
+
+        # Add the new column (nullable, so existing rows get NULL)
+        conn.execute("ALTER TABLE emails ADD COLUMN emlx_path TEXT")
+
+        # Add index for efficient path lookups
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_emails_path ON emails(emlx_path)"
+        )
+
+        logger.info(
+            "Migration v2→v3 complete. Run 'jxa-mail-mcp rebuild' "
+            "to populate emlx_path for existing emails."
+        )
 
     conn.execute("UPDATE schema_version SET version = ?", (to_version,))
     conn.commit()

@@ -1,7 +1,7 @@
 [project]
 name = "jxa-mail-mcp"
-version = "0.2.0"
-description = "Fast MCP server for Apple Mail via optimized JXA scripts"
+version = "0.3.0"
+description = "Fast MCP server for Apple Mail with FTS5 search index"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.13"
@@ -32,6 +32,7 @@ classifiers = [
 dependencies = [
     "fastmcp>=3.0.0b1,<4",
     "cyclopts>=5.0.0a1",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.urls]
@@ -59,7 +60,12 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ruff>=0.14.8",
+    "pytest>=8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 target-version = "py313"
@@ -76,6 +82,9 @@ select = [
     "RUF",
     "UP",
     "W",
+]
+ignore = [
+    "ASYNC109",  # Timeout parameter pattern is cleaner API for our use case
 ]
 
 [tool.ruff.format]

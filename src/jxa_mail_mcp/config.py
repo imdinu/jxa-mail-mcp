@@ -1,6 +1,10 @@
 """Configuration for JXA Mail MCP server."""
 
 import os
+from pathlib import Path
+
+# Default index location
+DEFAULT_INDEX_PATH = Path.home() / ".jxa-mail-mcp" / "index.db"
 
 
 def get_default_account() -> str | None:
@@ -27,3 +31,51 @@ def get_default_mailbox() -> str:
         Mailbox name.
     """
     return os.environ.get("JXA_MAIL_DEFAULT_MAILBOX", "Inbox")
+
+
+# ========== Index Configuration ==========
+
+
+def get_index_path() -> Path:
+    """
+    Get the FTS5 index database path.
+
+    Set JXA_MAIL_INDEX_PATH to customize the location.
+    Defaults to ~/.jxa-mail-mcp/index.db
+
+    Returns:
+        Path to the index database file.
+    """
+    env_path = os.environ.get("JXA_MAIL_INDEX_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+    return DEFAULT_INDEX_PATH
+
+
+def get_index_max_emails() -> int:
+    """
+    Get the maximum number of emails to index per mailbox.
+
+    Set JXA_MAIL_INDEX_MAX_EMAILS to customize.
+    Defaults to 5000 emails per mailbox.
+
+    Returns:
+        Maximum emails per mailbox.
+    """
+    return int(os.environ.get("JXA_MAIL_INDEX_MAX_EMAILS", "5000"))
+
+
+def get_index_staleness_hours() -> float:
+    """
+    Get the staleness threshold for the index.
+
+    After this many hours without a sync, the index is considered stale
+    and should be refreshed.
+
+    Set JXA_MAIL_INDEX_STALENESS_HOURS to customize.
+    Defaults to 24 hours.
+
+    Returns:
+        Staleness threshold in hours.
+    """
+    return float(os.environ.get("JXA_MAIL_INDEX_STALENESS_HOURS", "24"))

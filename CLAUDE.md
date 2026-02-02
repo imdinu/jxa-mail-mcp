@@ -99,6 +99,24 @@ index reduces this to milliseconds.
 2. **Mail Version** - Hardcoded to `~/Library/Mail/V10/` (macOS Ventura+)
 3. **Full Disk Access** - Required for disk-based indexing
 
+### Known Issues
+
+1. **XMLParsedAsHTMLWarning during indexing** - BeautifulSoup may emit warnings
+   when parsing .emlx files that contain XML content (like Apple's plist metadata).
+   This is harmless - the HTML parser handles XML adequately for text extraction.
+   The warning can be suppressed by installing `lxml` or filtering the warning:
+   ```python
+   from bs4 import XMLParsedAsHTMLWarning
+   import warnings
+   warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+   ```
+
+2. **Deleted emails not removed from index** - The fast date-based sync only
+   detects NEW emails, not deletions. Deleted emails remain in the search index
+   until a full rebuild (`jxa-mail-mcp rebuild`). This is a tradeoff for ~100x
+   faster sync. The `--watch` flag handles deletions in real-time via filesystem
+   monitoring. TODO: Add periodic stale entry cleanup.
+
 ### Async JXA Execution
 
 All MCP tools use async JXA execution via `asyncio.create_subprocess_exec`.

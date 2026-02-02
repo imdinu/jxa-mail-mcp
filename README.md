@@ -92,6 +92,7 @@ Once configured, you can search emails, get today's messages, find unread emails
 jxa-mail-mcp            # Run MCP server (default)
 jxa-mail-mcp serve      # Run MCP server explicitly
 jxa-mail-mcp --watch    # Run with real-time index updates
+jxa-mail-mcp --no-sync  # Skip startup sync (faster startup)
 jxa-mail-mcp index      # Build search index from disk
 jxa-mail-mcp status     # Show index statistics
 jxa-mail-mcp rebuild    # Force rebuild index
@@ -301,6 +302,32 @@ if m.has_index():
 | DoS via Large Files | 25 MB file size limit | `disk.py` |
 | Path Traversal | Path validation in watcher | `watcher.py` |
 | Data Exposure | Database created with 0600 permissions | `schema.py` |
+
+## Known Issues
+
+### XMLParsedAsHTMLWarning during indexing
+
+When running `jxa-mail-mcp index`, you may see warnings like:
+
+```
+XMLParsedAsHTMLWarning: It looks like you're using an HTML parser to parse an XML document.
+```
+
+This is **harmless** - BeautifulSoup's HTML parser handles the XML plist metadata in `.emlx` files adequately for text extraction. The warning can be suppressed by installing `lxml`:
+
+```bash
+pip install lxml
+```
+
+### Deleted emails not removed from index
+
+The fast startup sync only detects **new** emails, not deletions. Deleted emails remain searchable until you run:
+
+```bash
+jxa-mail-mcp rebuild
+```
+
+**Workaround:** Use `--watch` flag which monitors the filesystem and handles deletions in real-time.
 
 ## Troubleshooting
 

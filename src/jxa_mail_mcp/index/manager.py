@@ -314,9 +314,9 @@ class IndexManager:
         Returns:
             Number of new emails synced
         """
-        from .sync import sync_incremental
+        from .sync import sync_by_date
 
-        return sync_incremental(self._get_conn(), progress_callback)
+        return sync_by_date(self._get_conn(), progress_callback)
 
     def search(
         self,

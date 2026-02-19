@@ -20,24 +20,15 @@ from apple_mail_mcp.index.schema import (
 class TestSchemaSQL:
     """Tests for schema SQL generation."""
 
-    def test_schema_creates_emails_table(self, temp_db: sqlite3.Connection):
+    @pytest.mark.parametrize("table", ["emails", "emails_fts", "sync_state"])
+    def test_schema_creates_required_tables(
+        self, temp_db: sqlite3.Connection, table
+    ):
+        """Schema creates all required tables."""
         cursor = temp_db.execute(
             "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='emails'"
-        )
-        assert cursor.fetchone() is not None
-
-    def test_schema_creates_fts_table(self, temp_db: sqlite3.Connection):
-        cursor = temp_db.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='emails_fts'"
-        )
-        assert cursor.fetchone() is not None
-
-    def test_schema_creates_sync_state_table(self, temp_db: sqlite3.Connection):
-        cursor = temp_db.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='sync_state'"
+            "WHERE type='table' AND name=?",
+            (table,),
         )
         assert cursor.fetchone() is not None
 

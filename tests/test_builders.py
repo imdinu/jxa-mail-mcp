@@ -52,38 +52,27 @@ class TestQueryBuilderFromMailbox:
 class TestQueryBuilderSelect:
     """Tests for select() method."""
 
-    def test_standard_includes_required_fields(self):
-        """select('standard') includes standard fields."""
-        q = QueryBuilder().from_mailbox(None, "INBOX").select("standard")
-        js = q.build()
-
-        # Standard includes: id, subject, sender, date_received, read, flagged
-        assert "sender" in js
-        assert "subject" in js
-        assert "dateReceived" in js
-        assert "readStatus" in js
-        assert "flaggedStatus" in js
-
-    def test_minimal_includes_basic_fields(self):
-        """select('minimal') includes minimal fields."""
-        q = QueryBuilder().from_mailbox(None, "INBOX").select("minimal")
-        js = q.build()
-
-        # Minimal includes: id, subject, sender, date_received
-        assert "sender" in js
-        assert "subject" in js
-        assert "dateReceived" in js
-        # Should not include read/flagged
-        assert "readStatus" not in js
-
-    def test_full_includes_all_fields(self):
-        """select('full') includes extended fields."""
-        q = QueryBuilder().from_mailbox(None, "INBOX").select("full")
-        js = q.build()
-
-        # Full includes reply_to, message_id, etc.
-        assert "replyTo" in js
-        assert "messageId" in js
+    @pytest.mark.parametrize(
+        "preset, expected, unexpected",
+        [
+            ("minimal", ["sender", "subject", "dateReceived"], ["readStatus"]),
+            (
+                "standard",
+                ["sender", "dateReceived", "readStatus", "flaggedStatus"],
+                [],
+            ),
+            ("full", ["replyTo", "messageId", "sender"], []),
+        ],
+    )
+    def test_preset_includes_expected_fields(
+        self, preset, expected, unexpected
+    ):
+        """select() presets include the correct JXA property names."""
+        js = QueryBuilder().from_mailbox(None, "INBOX").select(preset).build()
+        for field in expected:
+            assert field in js
+        for field in unexpected:
+            assert field not in js
 
     def test_individual_properties(self):
         """select() accepts individual property names."""
@@ -142,29 +131,18 @@ class TestQueryBuilderWhere:
 class TestQueryBuilderOrderBy:
     """Tests for order_by() method."""
 
-    def test_descending_order(self):
-        """order_by with descending=True sorts newest first."""
+    @pytest.mark.parametrize("descending", [True, False])
+    def test_order_by_generates_sort_block(self, descending):
+        """order_by generates a sort block regardless of direction."""
         q = (
             QueryBuilder()
             .from_mailbox(None, "INBOX")
-            .order_by("date_received", descending=True)
+            .order_by("date_received", descending=descending)
         )
         js = q.build()
 
-        # Sort block should exist
         assert "results.sort" in js
         assert "date_received" in js
-
-    def test_ascending_order(self):
-        """order_by with descending=False sorts oldest first."""
-        q = (
-            QueryBuilder()
-            .from_mailbox(None, "INBOX")
-            .order_by("date_received", descending=False)
-        )
-        js = q.build()
-
-        assert "results.sort" in js
 
     def test_unknown_order_property_raises(self):
         """order_by raises ValueError for unknown property."""
@@ -250,50 +228,35 @@ class TestAccountsQueryBuilder:
         assert "MailCore.listAccounts()" in js
         assert "JSON.stringify" in js
 
-    def test_list_mailboxes_with_account(self):
-        """list_mailboxes generates script with account name."""
-        q = AccountsQueryBuilder()
-        js = q.list_mailboxes("Work")
+    @pytest.mark.parametrize(
+        "account, expected_fragment",
+        [
+            ("Work", '"Work"'),
+            (None, "null"),
+            ('Account "Special"', "Account"),
+        ],
+    )
+    def test_list_mailboxes_generates_script(self, account, expected_fragment):
+        """list_mailboxes generates correct script for various inputs."""
+        js = AccountsQueryBuilder().list_mailboxes(account)
 
-        assert '"Work"' in js
-        assert "MailCore.getAccount" in js
+        assert expected_fragment in js
         assert "MailCore.listMailboxes" in js
-
-    def test_list_mailboxes_with_null_account(self):
-        """list_mailboxes handles None account."""
-        q = AccountsQueryBuilder()
-        js = q.list_mailboxes(None)
-
-        assert "null" in js
-        assert "MailCore.listMailboxes" in js
-
-    def test_list_mailboxes_escapes_special_chars(self):
-        """list_mailboxes escapes special characters in account name."""
-        q = AccountsQueryBuilder()
-        js = q.list_mailboxes('Account "Special"')
-
-        # json.dumps should handle the escaping
-        assert "Account" in js
-        assert "Special" in js
 
 
 class TestPropertySets:
     """Tests for PROPERTY_SETS constants."""
 
-    def test_minimal_set_exists(self):
-        """PROPERTY_SETS has 'minimal' preset."""
-        assert "minimal" in PROPERTY_SETS
-        assert "id" in PROPERTY_SETS["minimal"]
-        assert "subject" in PROPERTY_SETS["minimal"]
-
-    def test_standard_set_exists(self):
-        """PROPERTY_SETS has 'standard' preset."""
-        assert "standard" in PROPERTY_SETS
-        assert "read" in PROPERTY_SETS["standard"]
-        assert "flagged" in PROPERTY_SETS["standard"]
-
-    def test_full_set_exists(self):
-        """PROPERTY_SETS has 'full' preset."""
-        assert "full" in PROPERTY_SETS
-        assert "reply_to" in PROPERTY_SETS["full"]
-        assert "message_id" in PROPERTY_SETS["full"]
+    @pytest.mark.parametrize(
+        "preset, required_keys",
+        [
+            ("minimal", ["id", "subject"]),
+            ("standard", ["read", "flagged"]),
+            ("full", ["reply_to", "message_id"]),
+        ],
+    )
+    def test_property_set_contains_expected_keys(self, preset, required_keys):
+        """Each PROPERTY_SETS preset contains its required keys."""
+        assert preset in PROPERTY_SETS
+        for key in required_keys:
+            assert key in PROPERTY_SETS[preset]

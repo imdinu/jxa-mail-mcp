@@ -247,11 +247,9 @@ class TestSearch:
     @pytest.mark.asyncio
     async def test_uses_fts_when_index_available(self, populated_db):
         """search uses FTS5 path when index exists."""
-        # Create a mock IndexManager that has an index
         mock_manager = MagicMock()
         mock_manager.has_index.return_value = True
 
-        # Create mock SearchResult objects
         mock_result = MagicMock()
         mock_result.id = 1001
         mock_result.subject = "Invoice #12345"
@@ -263,8 +261,21 @@ class TestSearch:
         mock_result.mailbox = "INBOX"
         mock_manager.search.return_value = [mock_result]
 
-        with patch("apple_mail_mcp.server._get_index_manager") as mock_get:
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = None
+        mock_acct_map.uuid_to_name.side_effect = lambda x: x
+
+        with (
+            patch(
+                "apple_mail_mcp.server._get_index_manager"
+            ) as mock_get,
+            patch(
+                "apple_mail_mcp.server._get_account_map"
+            ) as mock_get_map,
+        ):
             mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
 
             from apple_mail_mcp.server import search
 
@@ -274,6 +285,108 @@ class TestSearch:
             assert result[0]["subject"] == "Invoice #12345"
             assert result[0]["matched_in"] == "body"
             mock_manager.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fts_translates_account_name_to_uuid(self):
+        """search(account="Work") translates to UUID for FTS5."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_manager.search.return_value = []
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = "UUID-WORK-123"
+
+        with (
+            patch(
+                "apple_mail_mcp.server._get_index_manager"
+            ) as mock_get,
+            patch(
+                "apple_mail_mcp.server._get_account_map"
+            ) as mock_get_map,
+        ):
+            mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import search
+
+            await search("invoice", account="Work")
+
+            # Verify manager.search received the UUID, not "Work"
+            call_kwargs = mock_manager.search.call_args[1]
+            assert call_kwargs["account"] == "UUID-WORK-123"
+
+    @pytest.mark.asyncio
+    async def test_fts_results_show_friendly_account_name(self):
+        """FTS5 results translate UUID back to friendly name."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+
+        mock_result = MagicMock()
+        mock_result.id = 1
+        mock_result.subject = "Test"
+        mock_result.sender = "a@b.com"
+        mock_result.date_received = "2024-01-01"
+        mock_result.score = 1.0
+        mock_result.content_snippet = "..."
+        mock_result.account = "UUID-WORK-123"
+        mock_result.mailbox = "INBOX"
+        mock_manager.search.return_value = [mock_result]
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = None
+        mock_acct_map.uuid_to_name.return_value = "Work"
+
+        with (
+            patch(
+                "apple_mail_mcp.server._get_index_manager"
+            ) as mock_get,
+            patch(
+                "apple_mail_mcp.server._get_account_map"
+            ) as mock_get_map,
+        ):
+            mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import search
+
+            result = await search("test")
+
+            # Result should show "Work", not "UUID-WORK-123"
+            assert result[0]["account"] == "Work"
+
+    @pytest.mark.asyncio
+    async def test_fts_account_filter_falls_back_to_raw_value(
+        self,
+    ):
+        """If name isn't in AccountMap, pass it through as-is."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_manager.search.return_value = []
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = None  # Not found
+
+        with (
+            patch(
+                "apple_mail_mcp.server._get_index_manager"
+            ) as mock_get,
+            patch(
+                "apple_mail_mcp.server._get_account_map"
+            ) as mock_get_map,
+        ):
+            mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import search
+
+            await search("test", account="RAW-UUID-ABC")
+
+            # Should pass through the raw value as fallback
+            call_kwargs = mock_manager.search.call_args[1]
+            assert call_kwargs["account"] == "RAW-UUID-ABC"
 
     @pytest.mark.asyncio
     @patch("apple_mail_mcp.server.execute_query_async")
@@ -341,8 +454,20 @@ class TestSearch:
         mock_manager.has_index.return_value = True
         mock_manager.search.return_value = []
 
-        with patch("apple_mail_mcp.server._get_index_manager") as mock_get:
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = None
+
+        with (
+            patch(
+                "apple_mail_mcp.server._get_index_manager"
+            ) as mock_get,
+            patch(
+                "apple_mail_mcp.server._get_account_map"
+            ) as mock_get_map,
+        ):
             mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
 
             from apple_mail_mcp.server import search
 

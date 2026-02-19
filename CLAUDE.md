@@ -439,12 +439,6 @@ Chart PNGs are committed (they ARE the results). JSON and HTML in `benchmarks/re
 2. **Mail Version** - Hardcoded to `~/Library/Mail/V10/` (macOS Ventura+)
 3. **Full Disk Access** - Required for disk-based indexing and sync
 
-## Known Issues
-
-1. **FTS5 search ignores account/mailbox filters** - The disk indexer stores
-   account UUIDs from folder paths, while JXA returns friendly names. This
-   mismatch prevents filtering. TODO: Map UUIDs to friendly names.
-
 ## Security
 
 ### Implemented Protections

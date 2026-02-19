@@ -62,6 +62,12 @@ For each email, the index stores:
 | `date_received` | `.emlx` header | — |
 | `emlx_path` | Filesystem path | — |
 
+### Account UUIDs vs Friendly Names
+
+The `account` column stores filesystem UUIDs (e.g., `24E569DF-5E45-...`), not friendly names like `"Work"`. This is intentional — the sync engine diffs `get_disk_inventory()` (UUID-keyed) against `get_db_inventory()` to detect new, deleted, and moved emails. Storing friendly names would break the diff, causing a full re-index on every sync cycle.
+
+Instead, translation happens at search time via `AccountMap` (`index/accounts.py`), which maps names to UUIDs using JXA's `Mail.accounts.id()`. The mapping is cached for 5 minutes and seeded automatically when `list_accounts()` is called.
+
 ## Database Schema
 
 The index uses SQLite with FTS5 external content tables:
@@ -154,7 +160,3 @@ The file watcher monitors `~/Library/Mail/V10/` for:
 | Initial build | — | ~1–2 min | One-time |
 | Disk usage | — | ~6 KB/email | — |
 
-## Known Limitations
-
-!!! warning "FTS5 search ignores account/mailbox filters"
-    The disk indexer stores account **UUIDs** from folder paths (e.g., `A1B2C3D4-...`), while JXA returns friendly names (e.g., `"iCloud"`). This mismatch prevents filtering search results by account or mailbox. Search currently returns results from **all indexed emails**.

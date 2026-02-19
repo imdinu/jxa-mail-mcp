@@ -1,30 +1,16 @@
 # Installation
 
-## No Installation Required
-
-Run directly from PyPI without installing anything:
-
-```bash
-pipx run apple-mail-mcp
-```
-
-This downloads and runs the latest version in a temporary environment. Great for trying it out.
-
 ## With pipx (Recommended)
-
-For faster startup on subsequent runs, install globally:
 
 ```bash
 pipx install apple-mail-mcp
 ```
 
+A persistent install is recommended because the FTS5 search index (`~/.apple-mail-mcp/index.db`) is built once and reused across sessions. Ephemeral runners like `pipx run` or `uvx` work but won't benefit from the cached index.
+
 ## With uv
 
 ```bash
-# Run without installing
-uvx apple-mail-mcp
-
-# Or install into a managed tool environment
 uv tool install apple-mail-mcp
 ```
 

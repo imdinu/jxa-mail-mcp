@@ -151,6 +151,3 @@ search("meeting notes", scope="body")
 search("deadline", limit=5)
 # Top 5 results
 ```
-
-!!! warning "Known limitation"
-    FTS5 search currently ignores `account` and `mailbox` filters due to a UUID-to-name mapping mismatch between the disk indexer and JXA. Results may include emails from all accounts.

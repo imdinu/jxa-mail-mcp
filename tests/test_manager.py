@@ -11,7 +11,6 @@ Tests the central orchestration class for the FTS5 search index:
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -54,17 +53,18 @@ class TestHasIndex:
     def teardown_method(self):
         IndexManager._instance = None
 
-    def test_has_index_returns_false_when_no_db(self, tmp_path):
-        """has_index returns False when database doesn't exist."""
-        manager = IndexManager(db_path=tmp_path / "missing.db")
-        assert manager.has_index() is False
-
-    def test_has_index_returns_true_when_db_exists(self, tmp_path):
-        """has_index returns True when database file exists."""
+    @pytest.mark.parametrize(
+        "file_exists, expected", [(False, False), (True, True)]
+    )
+    def test_has_index_reflects_db_existence(
+        self, tmp_path, file_exists, expected
+    ):
+        """has_index returns True iff the database file exists."""
         db_path = tmp_path / "test.db"
-        db_path.touch()  # Create empty file
+        if file_exists:
+            db_path.touch()
         manager = IndexManager(db_path=db_path)
-        assert manager.has_index() is True
+        assert manager.has_index() is expected
 
 
 class TestGetStats:
@@ -176,7 +176,9 @@ class TestSyncUpdates:
 
     @patch("apple_mail_mcp.index.sync.sync_from_disk")
     @patch("apple_mail_mcp.index.disk.find_mail_directory")
-    def test_sync_updates_calls_disk_sync(self, mock_find, mock_sync, temp_db_path):
+    def test_sync_updates_calls_disk_sync(
+        self, mock_find, mock_sync, temp_db_path
+    ):
         """sync_updates calls sync_from_disk with correct args."""
         mock_find.return_value = Path("/fake/mail")
         mock_result = MagicMock()
@@ -189,25 +191,18 @@ class TestSyncUpdates:
         assert result == 5
         mock_sync.assert_called_once()
 
+    @pytest.mark.parametrize(
+        "error_cls", [FileNotFoundError, PermissionError]
+    )
     @patch("apple_mail_mcp.index.disk.find_mail_directory")
-    def test_sync_updates_handles_missing_mail_dir(self, mock_find, temp_db_path):
-        """sync_updates returns 0 when mail directory not found."""
-        mock_find.side_effect = FileNotFoundError("Mail not found")
+    def test_sync_updates_handles_inaccessible_mail_dir(
+        self, mock_find, error_cls, temp_db_path
+    ):
+        """sync_updates returns 0 when mail directory is inaccessible."""
+        mock_find.side_effect = error_cls("Cannot access")
 
         manager = IndexManager(db_path=temp_db_path)
-        result = manager.sync_updates()
-
-        assert result == 0
-
-    @patch("apple_mail_mcp.index.disk.find_mail_directory")
-    def test_sync_updates_handles_permission_error(self, mock_find, temp_db_path):
-        """sync_updates returns 0 on permission errors."""
-        mock_find.side_effect = PermissionError("No access")
-
-        manager = IndexManager(db_path=temp_db_path)
-        result = manager.sync_updates()
-
-        assert result == 0
+        assert manager.sync_updates() == 0
 
 
 class TestSearch:
@@ -240,27 +235,15 @@ class TestClose:
     def teardown_method(self):
         IndexManager._instance = None
 
-    def test_close_closes_connection(self, temp_db_path):
-        """close() closes the database connection."""
-        manager = IndexManager(db_path=temp_db_path)
-        conn = manager._get_conn()
-
-        # Verify connection is open
-        conn.execute("SELECT 1")
-
-        manager.close()
-
-        # Connection should now be closed
-        assert manager._conn is None
-
     def test_close_is_idempotent(self, temp_db_path):
-        """close() can be called multiple times safely."""
+        """close() closes the connection and can be called repeatedly."""
         manager = IndexManager(db_path=temp_db_path)
         manager._get_conn()
 
         manager.close()
-        manager.close()  # Should not raise
+        assert manager._conn is None
 
+        manager.close()  # Should not raise
         assert manager._conn is None
 
 
@@ -332,13 +315,9 @@ class TestWatcher:
     def teardown_method(self):
         IndexManager._instance = None
 
-    def test_watcher_running_false_initially(self, temp_db_path):
-        """watcher_running is False before starting."""
+    def test_watcher_not_running_initially_and_stop_is_safe(self, temp_db_path):
+        """Watcher is not running initially; stop_watcher is a no-op."""
         manager = IndexManager(db_path=temp_db_path)
         assert manager.watcher_running is False
-
-    def test_stop_watcher_is_safe_when_not_running(self, temp_db_path):
-        """stop_watcher doesn't raise when watcher isn't running."""
-        manager = IndexManager(db_path=temp_db_path)
         manager.stop_watcher()  # Should not raise
         assert manager.watcher_running is False

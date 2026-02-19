@@ -98,6 +98,13 @@ def _get_index_manager():
     return IndexManager.get_instance()
 
 
+def _get_account_map():
+    """Get the AccountMap singleton, lazily imported."""
+    from .index.accounts import AccountMap
+
+    return AccountMap.get_instance()
+
+
 def _resolve_account(account: str | None) -> str | None:
     """Resolve account, using default from env if not specified."""
     return account if account is not None else get_default_account()
@@ -124,7 +131,12 @@ async def list_accounts() -> list[Account]:
         [{"name": "Work", "id": "abc123"}, {"name": "Personal", "id": "def456"}]
     """
     script = AccountsQueryBuilder().list_accounts()
-    return await execute_with_core_async(script)
+    accounts = await execute_with_core_async(script)
+
+    # Seed the account name↔UUID cache for search filtering
+    _get_account_map().load_from_jxa(accounts)
+
+    return accounts
 
 
 @mcp.tool
@@ -324,10 +336,21 @@ async def search(
     if scope in ("all", "body"):
         manager = _get_index_manager()
         if manager.has_index():
+            # Translate friendly name → UUID for index lookup
+            acct_map = _get_account_map()
+            await acct_map.ensure_loaded()
+
+            search_account = None
+            if resolved_account:
+                search_account = (
+                    acct_map.name_to_uuid(resolved_account)
+                    or resolved_account  # fallback: maybe already a UUID
+                )
+
             results = manager.search(
                 query,
-                account=None,  # Skip filter - UUID vs name mismatch
-                mailbox=None,  # Skip filter - index uses folder names
+                account=search_account,
+                mailbox=resolved_mailbox,
                 limit=limit,
             )
             return [
@@ -339,7 +362,7 @@ async def search(
                     "score": r.score,
                     "matched_in": "body",
                     "content_snippet": r.content_snippet,
-                    "account": r.account,
+                    "account": acct_map.uuid_to_name(r.account),
                     "mailbox": r.mailbox,
                 }
                 for r in results

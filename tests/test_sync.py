@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from apple_mail_mcp.index.disk import get_disk_inventory
-from apple_mail_mcp.index.schema import get_schema_sql, SCHEMA_VERSION
+from apple_mail_mcp.index.schema import SCHEMA_VERSION, get_schema_sql
 from apple_mail_mcp.index.sync import (
     SyncResult,
     get_db_inventory,

@@ -14,7 +14,7 @@ A fast MCP server for Apple Mail — **87x faster** email fetching via batch JXA
 ## Quick Start
 
 ```bash
-pipx run apple-mail-mcp
+pipx install apple-mail-mcp
 ```
 
 Add to your MCP client:

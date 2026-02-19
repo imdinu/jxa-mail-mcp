@@ -31,8 +31,16 @@ theme:
     - search.suggest
     - search.highlight
     - content.code.copy
+  custom_dir: overrides
   icon:
     repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/imdinu/apple-mail-mcp
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/apple-mail-mcp/
 
 plugins:
   - search

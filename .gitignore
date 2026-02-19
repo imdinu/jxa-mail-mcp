@@ -38,6 +38,10 @@ htmlcov/
 # MkDocs
 site/
 
+# MCP Registry
+mcp-publisher
+.mcpregistry_*
+
 # Benchmarks (regenerable outputs)
 benchmarks/results/*.json
 benchmarks/results/*.html

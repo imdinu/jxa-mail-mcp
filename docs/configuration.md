@@ -11,6 +11,7 @@ Apple Mail MCP is configured via environment variables. All settings have sensib
 | `APPLE_MAIL_INDEX_PATH` | `~/.apple-mail-mcp/index.db` | SQLite index database location |
 | `APPLE_MAIL_INDEX_MAX_EMAILS` | `5000` | Max emails per mailbox to index |
 | `APPLE_MAIL_INDEX_STALENESS_HOURS` | `24` | Hours before index is considered stale |
+| `APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES` | `Drafts` | Comma-separated mailboxes to skip in search |
 
 ## MCP Client Configuration
 

@@ -163,7 +163,7 @@ def _detect_matched_columns(query: str, result) -> str:
     return ", ".join(matched)
 
 
-# ========== MCP Tools (5 total) ==========
+# ========== MCP Tools (6 total) ==========
 
 
 @mcp.tool

@@ -61,6 +61,9 @@ For each email, the index stores:
 | `content` | `.emlx` body (HTML → text) | Yes |
 | `date_received` | `.emlx` header | — |
 | `emlx_path` | Filesystem path | — |
+| `attachment_count` | MIME parsing | — |
+
+Attachment metadata (filename, MIME type, file size) is stored in a separate `attachments` table, enabling `search(scope="attachments")` queries.
 
 ### Account UUIDs vs Friendly Names
 
@@ -73,7 +76,7 @@ Instead, translation happens at search time via `AccountMap` (`index/accounts.py
 The index uses SQLite with FTS5 external content tables:
 
 ```sql
--- Email content cache
+-- Email content cache (schema v4)
 CREATE TABLE emails (
     rowid INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id INTEGER NOT NULL,
@@ -84,8 +87,19 @@ CREATE TABLE emails (
     content TEXT,
     date_received TEXT,
     emlx_path TEXT,
+    attachment_count INTEGER DEFAULT 0,
     indexed_at TEXT DEFAULT (datetime('now')),
     UNIQUE(account, mailbox, message_id)
+);
+
+-- Attachment metadata (one-to-many from emails)
+CREATE TABLE attachments (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_rowid INTEGER NOT NULL REFERENCES emails(rowid) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    mime_type TEXT,
+    file_size INTEGER,
+    content_id TEXT
 );
 
 -- FTS5 index (external content — shares storage with emails table)

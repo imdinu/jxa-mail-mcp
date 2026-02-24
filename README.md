@@ -47,8 +47,9 @@ apple-mail-mcp index --verbose
 | `list_accounts()` | List email accounts |
 | `list_mailboxes(account?)` | List mailboxes |
 | `get_emails(filter?, limit?)` | Get emails — all, unread, flagged, today, this_week |
-| `get_email(message_id)` | Get single email with full content |
-| `search(query, scope?)` | Search — all, subject, sender, body |
+| `get_email(message_id)` | Get single email with full content + attachments |
+| `search(query, scope?)` | Search — all, subject, sender, body, attachments |
+| `get_attachment(message_id, filename)` | Extract attachment content (base64) |
 
 ## Performance
 
@@ -67,6 +68,7 @@ apple-mail-mcp index --verbose
 | `APPLE_MAIL_DEFAULT_ACCOUNT` | First account | Default email account |
 | `APPLE_MAIL_DEFAULT_MAILBOX` | `INBOX` | Default mailbox |
 | `APPLE_MAIL_INDEX_PATH` | `~/.apple-mail-mcp/index.db` | Index location |
+| `APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES` | `Drafts` | Mailboxes to skip in search |
 
 ```json
 {

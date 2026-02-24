@@ -15,7 +15,11 @@ TOOLS (5 total):
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import re
+from pathlib import Path
 from typing import Literal, TypedDict
 
 from fastmcp import FastMCP
@@ -73,7 +77,15 @@ class SearchResult(TypedDict, total=False):
     mailbox: str
 
 
-class EmailFull(TypedDict):
+class AttachmentSummary(TypedDict):
+    """Summary of an email attachment."""
+
+    filename: str
+    mime_type: str
+    size: int
+
+
+class EmailFull(TypedDict, total=False):
     """Complete email with full content."""
 
     id: int
@@ -86,6 +98,7 @@ class EmailFull(TypedDict):
     flagged: bool
     reply_to: str
     message_id: str
+    attachments: list[AttachmentSummary]
 
 
 # ========== Helper Functions ==========
@@ -113,6 +126,41 @@ def _resolve_account(account: str | None) -> str | None:
 def _resolve_mailbox(mailbox: str | None) -> str:
     """Resolve mailbox, using default from env if not specified."""
     return mailbox if mailbox is not None else get_default_mailbox()
+
+
+# Module-level lock to prevent duplicate concurrent syncs
+_sync_lock = asyncio.Lock()
+
+
+def _detect_matched_columns(query: str, result) -> str:
+    """Detect which columns the query matched in.
+
+    Extracts search terms from the query and checks them against
+    the result's subject, sender, and content_snippet using simple
+    Python string matching.
+
+    Returns:
+        Comma-separated list like ``"subject, body"``
+    """
+    # Extract search terms (strip FTS5 operators and quotes)
+    terms = re.findall(r"[a-zA-Z0-9]+", query.lower())
+    if not terms:
+        return "body"
+
+    matched = []
+
+    subject_lower = (result.subject or "").lower()
+    sender_lower = (result.sender or "").lower()
+
+    if any(t in subject_lower for t in terms):
+        matched.append("subject")
+    if any(t in sender_lower for t in terms):
+        matched.append("sender")
+
+    # Body is always included since FTS5 matched the whole content
+    matched.append("body")
+
+    return ", ".join(matched)
 
 
 # ========== MCP Tools (5 total) ==========
@@ -214,6 +262,67 @@ async def get_emails(
     return await execute_query_async(query)
 
 
+def _build_attachment_js() -> str:
+    """Return JXA snippet to extract attachment metadata from `msg`."""
+    return """
+let attachments = [];
+try {
+    const atts = msg.mailAttachments();
+    if (atts && atts.length > 0) {
+        for (let a of atts) {
+            try {
+                attachments.push({
+                    filename: a.name(),
+                    mime_type: a.mimeType() || 'application/octet-stream',
+                    size: a.fileSize() || 0
+                });
+            } catch(ae) {}
+        }
+    }
+} catch(e) {}
+"""
+
+
+def _build_get_email_script(message_id: int, mailbox_setup: str) -> str:
+    """Build JXA script to fetch a single email by ID.
+
+    Extracted to avoid duplication between the primary and
+    fallback fetch strategies.
+    """
+    att_js = _build_attachment_js()
+    return f"""
+const targetId = {message_id};
+let msg = null;
+{mailbox_setup}
+
+const ids = mailbox.messages.id();
+const idx = ids.indexOf(targetId);
+if (idx !== -1) {{
+    msg = mailbox.messages[idx];
+}}
+
+if (!msg) {{
+    throw new Error('Message not found with ID: ' + targetId);
+}}
+
+{att_js}
+
+JSON.stringify({{
+    id: msg.id(),
+    subject: msg.subject(),
+    sender: msg.sender(),
+    content: msg.content(),
+    date_received: MailCore.formatDate(msg.dateReceived()),
+    date_sent: MailCore.formatDate(msg.dateSent()),
+    read: msg.readStatus(),
+    flagged: msg.flaggedStatus(),
+    reply_to: msg.replyTo(),
+    message_id: msg.messageId(),
+    attachments: attachments
+}});
+"""
+
+
 @mcp.tool
 async def get_email(
     message_id: int,
@@ -223,8 +332,10 @@ async def get_email(
     """
     Get a single email with full content.
 
-    Retrieves complete email details including the full body text.
-    Use this after finding an email via search to read its content.
+    Uses a 3-strategy cascade:
+    1. Try the specified mailbox directly
+    2. Look up location in the FTS5 index (fast, no JXA)
+    3. Iterate all mailboxes with per-mailbox error handling
 
     Args:
         message_id: The email's unique ID (from search results)
@@ -237,6 +348,14 @@ async def get_email(
         - content: Full plain text body
         - read, flagged status
         - reply_to, message_id (email Message-ID header)
+        - attachments: List of {filename, mime_type, size}
+
+    Note:
+        The attachments list comes from JXA's mailAttachments(),
+        which only reports file attachments visible in Mail.app's
+        UI. Inline images, S/MIME signatures, and attachments in
+        sent/bounce-back emails may not appear. Use get_attachment
+        with a known filename for reliable extraction from disk.
 
     Example:
         >>> get_email(12345)
@@ -246,38 +365,75 @@ async def get_email(
     resolved_account = _resolve_account(account)
     resolved_mailbox = _resolve_mailbox(mailbox)
 
+    # Strategy 1: Try specified mailbox
     mailbox_setup = build_mailbox_setup_js(resolved_account, resolved_mailbox)
+    script = _build_get_email_script(message_id, mailbox_setup)
 
+    try:
+        return await execute_with_core_async(script)
+    except Exception:
+        pass  # Fall through to strategy 2
+
+    # Strategy 2: Index lookup — find the email's real location
+    try:
+        manager = _get_index_manager()
+        if manager.has_index():
+            conn = manager._get_conn()
+            cursor = conn.execute(
+                "SELECT account, mailbox FROM emails "
+                "WHERE message_id = ? LIMIT 1",
+                (message_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                idx_account = row["account"]
+                idx_mailbox = row["mailbox"]
+
+                # Translate UUID → friendly name for JXA
+                acct_map = _get_account_map()
+                await acct_map.ensure_loaded()
+                friendly_account = acct_map.uuid_to_name(idx_account)
+
+                setup = build_mailbox_setup_js(friendly_account, idx_mailbox)
+                script = _build_get_email_script(message_id, setup)
+                try:
+                    return await execute_with_core_async(script)
+                except Exception:
+                    pass  # Fall through to strategy 3
+    except Exception:
+        pass  # Index unavailable, fall through
+
+    # Strategy 3: Iterate all mailboxes with per-mailbox error handling
+    acct_setup = (
+        f"const account = Mail.accounts.byName({json.dumps(resolved_account)});"
+        if resolved_account
+        else "const account = Mail.accounts[0];"
+    )
+    att_js = _build_attachment_js()
     script = f"""
 const targetId = {message_id};
-
-// Try to find the message in the specified mailbox first
 let msg = null;
-{mailbox_setup}
+{acct_setup}
 
-// Search in specified mailbox
-const ids = mailbox.messages.id();
-const idx = ids.indexOf(targetId);
-if (idx !== -1) {{
-    msg = mailbox.messages[idx];
-}}
-
-// If not found, search all mailboxes in the account
-if (!msg) {{
-    const allMailboxes = account.mailboxes();
-    for (let i = 0; i < allMailboxes.length && !msg; i++) {{
+const allMailboxes = account.mailboxes();
+for (let i = 0; i < allMailboxes.length && !msg; i++) {{
+    try {{
         const mb = allMailboxes[i];
         const mbIds = mb.messages.id();
         const mbIdx = mbIds.indexOf(targetId);
         if (mbIdx !== -1) {{
             msg = mb.messages[mbIdx];
         }}
+    }} catch(e) {{
+        // Skip inaccessible mailboxes (Junk/Drafts -1728)
     }}
 }}
 
 if (!msg) {{
     throw new Error('Message not found with ID: ' + targetId);
 }}
+
+{att_js}
 
 JSON.stringify({{
     id: msg.id(),
@@ -289,10 +445,101 @@ JSON.stringify({{
     read: msg.readStatus(),
     flagged: msg.flaggedStatus(),
     reply_to: msg.replyTo(),
-    message_id: msg.messageId()
+    message_id: msg.messageId(),
+    attachments: attachments
 }});
 """
     return await execute_with_core_async(script)
+
+
+MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+class AttachmentContent(TypedDict, total=False):
+    """Attachment content returned by get_attachment."""
+
+    filename: str
+    mime_type: str
+    size: int
+    content_base64: str
+    truncated: bool
+
+
+@mcp.tool
+async def get_attachment(
+    message_id: int,
+    filename: str,
+    account: str | None = None,
+    mailbox: str | None = None,
+) -> AttachmentContent:
+    """
+    Get the content of a specific email attachment.
+
+    Looks up the email's .emlx file path in the index and extracts
+    the attachment binary content, returning it as base64. This
+    parses the raw MIME structure, so it works for all attachment
+    types including inline images and S/MIME signatures.
+
+    Requires the search index. If upgrading from v0.1.2, run
+    'apple-mail-mcp rebuild' to populate attachment metadata.
+
+    Args:
+        message_id: The email's unique ID
+        filename: The attachment filename to extract
+        account: Account name (optional, used for index lookup)
+        mailbox: Mailbox name (optional, used for index lookup)
+
+    Returns:
+        Dictionary with filename, mime_type, size, and content_base64.
+        If the attachment exceeds 10 MB, returns metadata only with
+        truncated=True.
+
+    Example:
+        >>> get_attachment(12345, "invoice.pdf")
+        {"filename": "invoice.pdf", "mime_type": "application/pdf",
+         "size": 52340, "content_base64": "JVBERi0x..."}
+    """
+    from .index.disk import get_attachment_content
+
+    # Look up emlx_path from the index
+    manager = _get_index_manager()
+    if not manager.has_index():
+        raise ValueError("No search index. Run 'apple-mail-mcp index'.")
+
+    conn = manager._get_conn()
+    cursor = conn.execute(
+        "SELECT emlx_path FROM emails WHERE message_id = ? LIMIT 1",
+        (message_id,),
+    )
+    row = cursor.fetchone()
+    if not row or not row["emlx_path"]:
+        raise ValueError(f"Email {message_id} not found in index.")
+
+    emlx_path = Path(row["emlx_path"])
+    result = await asyncio.to_thread(
+        get_attachment_content, emlx_path, filename
+    )
+    if result is None:
+        raise ValueError(
+            f"Attachment '{filename}' not found in email {message_id}."
+        )
+
+    raw_bytes, mime_type = result
+
+    if len(raw_bytes) > MAX_ATTACHMENT_SIZE:
+        return {
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": len(raw_bytes),
+            "truncated": True,
+        }
+
+    return {
+        "filename": filename,
+        "mime_type": mime_type,
+        "size": len(raw_bytes),
+        "content_base64": base64.b64encode(raw_bytes).decode("ascii"),
+    }
 
 
 @mcp.tool
@@ -300,8 +547,9 @@ async def search(
     query: str,
     account: str | None = None,
     mailbox: str | None = None,
-    scope: Literal["all", "subject", "sender", "body"] = "all",
+    scope: Literal["all", "subject", "sender", "body", "attachments"] = "all",
     limit: int = 20,
+    exclude_mailboxes: list[str] | None = None,
 ) -> list[SearchResult]:
     """
     Search emails with automatic FTS5 optimization.
@@ -311,14 +559,18 @@ async def search(
 
     Args:
         query: Search term or phrase
-        account: Account name (optional filter)
-        mailbox: Mailbox name (optional filter)
+        account: Account name (optional filter).
+            None means search ALL accounts (ignores default).
+        mailbox: Mailbox name (optional filter).
+            None means search ALL mailboxes.
         scope: Where to search:
             - "all": Search subject, sender, AND body (default, uses FTS5)
             - "subject": Search subject only
             - "sender": Search sender only
             - "body": Search body content only
+            - "attachments": Search by attachment filename
         limit: Maximum results (default: 20)
+        exclude_mailboxes: Mailboxes to exclude (default: ["Drafts"])
 
     Returns:
         List of matching emails sorted by relevance (when using FTS5)
@@ -326,32 +578,97 @@ async def search(
 
     Examples:
         >>> search("invoice")  # Search everywhere
-        >>> search("john@example.com", scope="sender")  # From specific sender
-        >>> search("meeting notes", scope="body")  # In email body only
+        >>> search("john@example.com", scope="sender")
+        >>> search("meeting notes", scope="body")
     """
-    resolved_account = _resolve_account(account)
-    resolved_mailbox = _resolve_mailbox(mailbox)
+    if exclude_mailboxes is None:
+        exclude_mailboxes = ["Drafts"]
+
+    # Attachment filename search (SQL LIKE query, no JXA needed)
+    if scope == "attachments":
+        manager = _get_index_manager()
+        if not manager.has_index():
+            return []
+
+        conn = manager._get_conn()
+        like_pattern = f"%{query}%"
+
+        sql = """
+            SELECT e.message_id, e.account, e.mailbox,
+                   e.subject, e.sender, e.date_received,
+                   a.filename
+            FROM attachments a
+            JOIN emails e ON a.email_rowid = e.rowid
+            WHERE a.filename LIKE ?
+        """
+        params: list = [like_pattern]
+
+        if account:
+            acct_map = _get_account_map()
+            await acct_map.ensure_loaded()
+            search_acct = acct_map.name_to_uuid(account) or account
+            sql += " AND e.account = ?"
+            params.append(search_acct)
+        if mailbox:
+            sql += " AND e.mailbox = ?"
+            params.append(mailbox)
+
+        sql += " ORDER BY e.date_received DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = conn.execute(sql, params)
+        acct_map = _get_account_map()
+        await acct_map.ensure_loaded()
+
+        return [
+            {
+                "id": row["message_id"],
+                "subject": row["subject"],
+                "sender": row["sender"],
+                "date_received": row["date_received"],
+                "score": 1.0,
+                "matched_in": f"attachment: {row['filename']}",
+                "account": acct_map.uuid_to_name(row["account"]),
+                "mailbox": row["mailbox"],
+            }
+            for row in cursor
+        ]
+
+    # S5: Split FTS5 vs JXA resolution
+    # FTS5: None = search all accounts/mailboxes
+    fts_account = account
+    fts_mailbox = mailbox
+    # JXA: resolve defaults (needs a concrete target)
+    jxa_account = _resolve_account(account)
+    jxa_mailbox = _resolve_mailbox(mailbox)
 
     # Try FTS5 index for "all" or "body" scope
     if scope in ("all", "body"):
         manager = _get_index_manager()
         if manager.has_index():
+            # S2: Auto-sync stale index before search
+            if manager.is_stale():
+                async with _sync_lock:
+                    if manager.is_stale():  # double-check
+                        await asyncio.to_thread(manager.sync_updates)
+
             # Translate friendly name → UUID for index lookup
             acct_map = _get_account_map()
             await acct_map.ensure_loaded()
 
             search_account = None
-            if resolved_account:
+            if fts_account:
                 search_account = (
-                    acct_map.name_to_uuid(resolved_account)
-                    or resolved_account  # fallback: maybe already a UUID
+                    acct_map.name_to_uuid(fts_account)
+                    or fts_account  # fallback: maybe already UUID
                 )
 
             results = manager.search(
                 query,
                 account=search_account,
-                mailbox=mailbox,  # pass raw value — None means all
+                mailbox=fts_mailbox,
                 limit=limit,
+                exclude_mailboxes=exclude_mailboxes,
             )
             return [
                 {
@@ -360,7 +677,7 @@ async def search(
                     "sender": r.sender,
                     "date_received": r.date_received,
                     "score": r.score,
-                    "matched_in": "body",
+                    "matched_in": _detect_matched_columns(query, r),
                     "content_snippet": r.content_snippet,
                     "account": acct_map.uuid_to_name(r.account),
                     "mailbox": r.mailbox,
@@ -388,7 +705,7 @@ async def search(
 
     q = (
         QueryBuilder()
-        .from_mailbox(resolved_account, resolved_mailbox)
+        .from_mailbox(jxa_account, jxa_mailbox)
         .select("standard")
         .where(filter_expr)
         .order_by("date_received", descending=True)

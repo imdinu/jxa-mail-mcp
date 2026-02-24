@@ -236,9 +236,66 @@ class TestGetEmail:
 
         await get_email(99999, account="Work", mailbox="INBOX")
 
-        call_args = mock_exec.call_args[0][0]  # First positional arg (script)
+        call_args = mock_exec.call_args[0][0]  # First positional arg
         assert "99999" in call_args
         assert "targetId" in call_args
+
+    @pytest.mark.asyncio
+    async def test_get_email_uses_index_for_fallback(self):
+        """B1: Strategy 2 uses index lookup when strategy 1 fails."""
+        call_count = 0
+
+        async def mock_exec_side_effect(script):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("Not found in specified mailbox")
+            if call_count == 2:
+                # Strategy 2 succeeds
+                return {
+                    "id": 42,
+                    "subject": "Found via index",
+                    "sender": "a@b.com",
+                    "content": "Body",
+                    "date_received": "2024-01-01",
+                    "date_sent": "2024-01-01",
+                    "read": True,
+                    "flagged": False,
+                    "reply_to": "",
+                    "message_id": "<x>",
+                }
+            return {}
+
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_conn = MagicMock()
+        mock_row = {"account": "uuid-123", "mailbox": "Archive"}
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = mock_row
+        mock_conn.execute.return_value = mock_cursor
+        mock_manager._get_conn.return_value = mock_conn
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.uuid_to_name.return_value = "Work"
+
+        with (
+            patch(
+                "apple_mail_mcp.server.execute_with_core_async",
+                side_effect=mock_exec_side_effect,
+            ),
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get_mgr,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
+        ):
+            mock_get_mgr.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import get_email
+
+            result = await get_email(42)
+
+            assert result["subject"] == "Found via index"
+            assert call_count == 2  # Strategy 1 failed, 2 succeeded
 
 
 class TestSearch:
@@ -267,12 +324,8 @@ class TestSearch:
         mock_acct_map.uuid_to_name.side_effect = lambda x: x
 
         with (
-            patch(
-                "apple_mail_mcp.server._get_index_manager"
-            ) as mock_get,
-            patch(
-                "apple_mail_mcp.server._get_account_map"
-            ) as mock_get_map,
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
         ):
             mock_get.return_value = mock_manager
             mock_get_map.return_value = mock_acct_map
@@ -283,7 +336,8 @@ class TestSearch:
 
             assert len(result) == 1
             assert result[0]["subject"] == "Invoice #12345"
-            assert result[0]["matched_in"] == "body"
+            # S1: matched_in is now detected dynamically
+            assert "body" in result[0]["matched_in"]
             mock_manager.search.assert_called_once()
 
     @pytest.mark.asyncio
@@ -298,12 +352,8 @@ class TestSearch:
         mock_acct_map.name_to_uuid.return_value = "UUID-WORK-123"
 
         with (
-            patch(
-                "apple_mail_mcp.server._get_index_manager"
-            ) as mock_get,
-            patch(
-                "apple_mail_mcp.server._get_account_map"
-            ) as mock_get_map,
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
         ):
             mock_get.return_value = mock_manager
             mock_get_map.return_value = mock_acct_map
@@ -339,12 +389,8 @@ class TestSearch:
         mock_acct_map.uuid_to_name.return_value = "Work"
 
         with (
-            patch(
-                "apple_mail_mcp.server._get_index_manager"
-            ) as mock_get,
-            patch(
-                "apple_mail_mcp.server._get_account_map"
-            ) as mock_get_map,
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
         ):
             mock_get.return_value = mock_manager
             mock_get_map.return_value = mock_acct_map
@@ -370,12 +416,8 @@ class TestSearch:
         mock_acct_map.name_to_uuid.return_value = None  # Not found
 
         with (
-            patch(
-                "apple_mail_mcp.server._get_index_manager"
-            ) as mock_get,
-            patch(
-                "apple_mail_mcp.server._get_account_map"
-            ) as mock_get_map,
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
         ):
             mock_get.return_value = mock_manager
             mock_get_map.return_value = mock_acct_map
@@ -459,12 +501,8 @@ class TestSearch:
         mock_acct_map.name_to_uuid.return_value = None
 
         with (
-            patch(
-                "apple_mail_mcp.server._get_index_manager"
-            ) as mock_get,
-            patch(
-                "apple_mail_mcp.server._get_account_map"
-            ) as mock_get_map,
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
         ):
             mock_get.return_value = mock_manager
             mock_get_map.return_value = mock_acct_map
@@ -530,3 +568,244 @@ class TestHelperFunctions:
             mock.return_value = "Inbox"
             result = _resolve_mailbox(None)
             assert result == "Inbox"
+
+
+class TestDetectMatchedColumns:
+    """Tests for S1: accurate matched_in detection."""
+
+    def test_detects_subject_match(self):
+        from apple_mail_mcp.server import _detect_matched_columns
+
+        result = MagicMock()
+        result.subject = "Meeting tomorrow"
+        result.sender = "boss@company.com"
+        result.content_snippet = "Please review..."
+
+        matched = _detect_matched_columns("meeting", result)
+        assert "subject" in matched
+        assert "body" in matched
+
+    def test_detects_sender_match(self):
+        from apple_mail_mcp.server import _detect_matched_columns
+
+        result = MagicMock()
+        result.subject = "Hello"
+        result.sender = "john@example.com"
+        result.content_snippet = "Hi there"
+
+        matched = _detect_matched_columns("john", result)
+        assert "sender" in matched
+
+    def test_body_always_included(self):
+        from apple_mail_mcp.server import _detect_matched_columns
+
+        result = MagicMock()
+        result.subject = "Other topic"
+        result.sender = "other@test.com"
+        result.content_snippet = "Some content"
+
+        matched = _detect_matched_columns("xyzunknown", result)
+        assert "body" in matched
+
+
+class TestSearchFtsAccountFiltering:
+    """Tests for S5: FTS5 None account means all."""
+
+    @pytest.mark.asyncio
+    async def test_search_fts_none_account_means_all(self):
+        """When account=None, FTS5 path should NOT resolve a default."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_manager.is_stale.return_value = False
+        mock_manager.search.return_value = []
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = None
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
+        ):
+            mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import search
+
+            await search("test", account=None)
+
+            # account should be None → search all
+            call_kwargs = mock_manager.search.call_args[1]
+            assert call_kwargs["account"] is None
+
+
+class TestSearchAutoSync:
+    """Tests for S2: auto-sync stale index."""
+
+    @pytest.mark.asyncio
+    async def test_search_auto_syncs_when_stale(self):
+        """Search triggers sync when index is stale."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_manager.is_stale.return_value = True
+        mock_manager.search.return_value = []
+        mock_manager.sync_updates.return_value = 5
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = None
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
+            patch(
+                "apple_mail_mcp.server.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_thread,
+        ):
+            mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import search
+
+            await search("test")
+
+            mock_thread.assert_called_once_with(mock_manager.sync_updates)
+
+
+class TestSearchExcludeMailboxes:
+    """Tests for S3: draft exclusion in search."""
+
+    @pytest.mark.asyncio
+    async def test_search_excludes_drafts_by_default(self):
+        """Search passes exclude_mailboxes=["Drafts"] by default."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_manager.is_stale.return_value = False
+        mock_manager.search.return_value = []
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.name_to_uuid.return_value = None
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
+        ):
+            mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import search
+
+            await search("test")
+
+            call_kwargs = mock_manager.search.call_args[1]
+            assert call_kwargs["exclude_mailboxes"] == ["Drafts"]
+
+
+class TestGetAttachment:
+    """Tests for A4: get_attachment tool."""
+
+    @pytest.mark.asyncio
+    async def test_get_attachment_returns_base64(self):
+        """get_attachment returns base64-encoded content."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_row = {"emlx_path": "/fake/path/42.emlx"}
+        mock_cursor.fetchone.return_value = mock_row
+        mock_conn.execute.return_value = mock_cursor
+        mock_manager._get_conn.return_value = mock_conn
+
+        fake_bytes = b"fake pdf content"
+        fake_result = (fake_bytes, "application/pdf")
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch(
+                "apple_mail_mcp.server.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_thread,
+        ):
+            mock_get.return_value = mock_manager
+            mock_thread.return_value = fake_result
+
+            from apple_mail_mcp.server import get_attachment
+
+            result = await get_attachment(42, "invoice.pdf")
+
+            assert result["filename"] == "invoice.pdf"
+            assert result["mime_type"] == "application/pdf"
+            assert result["size"] == len(fake_bytes)
+            assert "content_base64" in result
+
+    @pytest.mark.asyncio
+    async def test_get_attachment_raises_for_missing(self):
+        """get_attachment raises ValueError for missing attachment."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_row = {"emlx_path": "/fake/path/42.emlx"}
+        mock_cursor.fetchone.return_value = mock_row
+        mock_conn.execute.return_value = mock_cursor
+        mock_manager._get_conn.return_value = mock_conn
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch(
+                "apple_mail_mcp.server.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_thread,
+        ):
+            mock_get.return_value = mock_manager
+            mock_thread.return_value = None
+
+            from apple_mail_mcp.server import get_attachment
+
+            with pytest.raises(ValueError, match="not found"):
+                await get_attachment(42, "missing.pdf")
+
+
+class TestSearchAttachments:
+    """Tests for A5: search by attachment filename."""
+
+    @pytest.mark.asyncio
+    async def test_search_scope_attachments(self):
+        """search(scope='attachments') queries attachments table."""
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_conn = MagicMock()
+        mock_manager._get_conn.return_value = mock_conn
+
+        # Mock cursor with one result row
+        mock_row = {
+            "message_id": 1,
+            "account": "UUID-123",
+            "mailbox": "INBOX",
+            "subject": "Invoice attached",
+            "sender": "billing@co.com",
+            "date_received": "2024-01-15",
+            "filename": "invoice.pdf",
+        }
+        mock_conn.execute.return_value = [mock_row]
+
+        mock_acct_map = MagicMock()
+        mock_acct_map.ensure_loaded = AsyncMock()
+        mock_acct_map.uuid_to_name.return_value = "Work"
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_get_map,
+        ):
+            mock_get.return_value = mock_manager
+            mock_get_map.return_value = mock_acct_map
+
+            from apple_mail_mcp.server import search
+
+            results = await search("invoice", scope="attachments")
+
+            assert len(results) == 1
+            assert results[0]["matched_in"] == "attachment: invoice.pdf"
+            assert results[0]["account"] == "Work"

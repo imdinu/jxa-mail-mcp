@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .disk import find_mail_directory, parse_emlx
-from .schema import INSERT_EMAIL_SQL, create_connection, email_to_row
+from .schema import (
+    INSERT_ATTACHMENT_SQL,
+    INSERT_EMAIL_SQL,
+    create_connection,
+    email_to_row,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -118,7 +123,7 @@ class IndexWatcher:
         if self._conn:
             try:
                 self._conn.close()
-            except Exception:
+            except sqlite3.Error:
                 pass
             self._conn = None
 
@@ -281,12 +286,13 @@ class IndexWatcher:
                             logger.warning(
                                 "Failed to parse %s after retries: %s", path, e
                             )
-                    except Exception as e:
+                    except (ValueError, UnicodeDecodeError) as e:
                         logger.warning("Error parsing %s: %s", path, e)
                         break
 
                 if email:
                     try:
+                        attachments = email.attachments or []
                         row = email_to_row(
                             {
                                 "id": email.id,
@@ -298,8 +304,26 @@ class IndexWatcher:
                             account,
                             mailbox,
                             str(path),
+                            attachment_count=len(attachments),
                         )
                         conn.execute(INSERT_EMAIL_SQL, row)
+
+                        if attachments:
+                            rowid = conn.execute(
+                                "SELECT last_insert_rowid()"
+                            ).fetchone()[0]
+                            for att in attachments:
+                                conn.execute(
+                                    INSERT_ATTACHMENT_SQL,
+                                    (
+                                        rowid,
+                                        att.filename,
+                                        att.mime_type,
+                                        att.file_size,
+                                        att.content_id,
+                                    ),
+                                )
+
                         added_count += 1
                     except sqlite3.IntegrityError as e:
                         logger.debug("Duplicate email %s: %s", key, e)
@@ -315,7 +339,7 @@ class IndexWatcher:
         if self.on_update and (added_count or deleted_count):
             try:
                 self.on_update(added_count, deleted_count)
-            except Exception as e:
+            except Exception as e:  # Broad: user callback
                 logger.warning("Error in on_update callback: %s", e)
 
         if added_count or deleted_count:

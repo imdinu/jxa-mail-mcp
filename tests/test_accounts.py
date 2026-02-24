@@ -48,13 +48,15 @@ class TestLoadFromJxa:
     def test_skips_entries_with_missing_fields(self):
         """Entries missing name or id are silently skipped."""
         m = AccountMap()
-        m.load_from_jxa([
-            {"name": "Good", "id": "UUID-1"},
-            {"name": "", "id": "UUID-2"},       # empty name
-            {"name": "NoId", "id": ""},          # empty id
-            {"id": "UUID-3"},                    # missing name
-            {"name": "NoIdKey"},                 # missing id
-        ])
+        m.load_from_jxa(
+            [
+                {"name": "Good", "id": "UUID-1"},
+                {"name": "", "id": "UUID-2"},  # empty name
+                {"name": "NoId", "id": ""},  # empty id
+                {"id": "UUID-3"},  # missing name
+                {"name": "NoIdKey"},  # missing id
+            ]
+        )
         assert m.name_to_uuid("Good") == "UUID-1"
         assert m.name_to_uuid("") is None
         assert m.name_to_uuid("NoId") is None

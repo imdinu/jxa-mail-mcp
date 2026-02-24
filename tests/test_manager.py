@@ -191,9 +191,7 @@ class TestSyncUpdates:
         assert result == 5
         mock_sync.assert_called_once()
 
-    @pytest.mark.parametrize(
-        "error_cls", [FileNotFoundError, PermissionError]
-    )
+    @pytest.mark.parametrize("error_cls", [FileNotFoundError, PermissionError])
     @patch("apple_mail_mcp.index.disk.find_mail_directory")
     def test_sync_updates_handles_inaccessible_mail_dir(
         self, mock_find, error_cls, temp_db_path

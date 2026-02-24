@@ -18,8 +18,100 @@ import re
 import sqlite3
 from dataclasses import dataclass
 
-# Characters that have special meaning in FTS5 and need escaping
-FTS5_SPECIAL_CHARS = re.compile(r'(["\'\-\*\(\)\:\^])')
+# Characters that make a bare FTS5 token dangerous
+# (hyphens = NOT, colons = column filter, parens = grouping, etc.)
+_HAS_SPECIAL = re.compile(r"['\-\(\)\:\^]")
+
+# FTS5 boolean operators that should be passed through
+_FTS5_OPERATORS = {"OR", "AND", "NOT"}
+
+
+def _tokenize_fts_query(query: str) -> list[str]:
+    """Split query into phrase blocks and bare tokens.
+
+    Balanced double-quoted segments are kept intact (including quotes).
+    Unbalanced quotes are dropped.
+
+    Returns:
+        List of tokens — quoted phrases and individual bare words.
+    """
+    tokens: list[str] = []
+    i = 0
+    n = len(query)
+
+    while i < n:
+        # Skip whitespace
+        if query[i].isspace():
+            i += 1
+            continue
+
+        # Check for opening double quote
+        if query[i] == '"':
+            # Look for closing quote
+            end = query.find('"', i + 1)
+            if end != -1:
+                # Balanced phrase — keep as-is
+                tokens.append(query[i : end + 1])
+                i = end + 1
+            else:
+                # Unbalanced quote — skip it
+                i += 1
+        else:
+            # Bare token — collect until whitespace or quote
+            start = i
+            while i < n and not query[i].isspace() and query[i] != '"':
+                i += 1
+            tokens.append(query[start:i])
+
+    return tokens
+
+
+def _sanitize_bare_token(token: str) -> str:
+    """Sanitize a single bare FTS5 token.
+
+    FTS5 escaping works by wrapping in double quotes — backslash
+    escaping is NOT supported. Tokens containing special characters
+    are wrapped in ``"..."`` to prevent operator interpretation.
+
+    Preserves:
+    - Trailing ``*`` (prefix search)
+    - Boolean operators (OR, AND, NOT)
+    """
+    # Preserve boolean operators
+    if token in _FTS5_OPERATORS:
+        return token
+
+    # Check for trailing wildcard
+    has_wildcard = token.endswith("*") and len(token) > 1
+    core = token[:-1] if has_wildcard else token
+
+    # If the core contains special FTS5 chars, wrap in double quotes
+    if _HAS_SPECIAL.search(core):
+        # Escape internal double quotes by doubling them
+        safe_core = '"' + core.replace('"', '""') + '"'
+        # Wildcard must go outside the quotes for FTS5
+        return safe_core + "*" if has_wildcard else safe_core
+
+    return token
+
+
+def _escape_all_special(query: str) -> str:
+    """Aggressively quote ALL special tokens as last-resort fallback.
+
+    Used when the first search attempt raises a syntax error.
+    Each term is individually quoted to preserve multi-term semantics
+    (unlike wrapping in one big phrase, which changes OR → phrase).
+    """
+    words = query.split()
+    escaped: list[str] = []
+    for word in words:
+        if word in _FTS5_OPERATORS:
+            escaped.append(word)
+        else:
+            # Wrap in double quotes (FTS5's escaping mechanism)
+            safe = '"' + word.replace('"', '""') + '"'
+            escaped.append(safe)
+    return " ".join(escaped)
 
 
 def add_account_mailbox_filter(
@@ -28,6 +120,7 @@ def add_account_mailbox_filter(
     account: str | None,
     mailbox: str | None,
     table_alias: str = "e",
+    exclude_mailboxes: list[str] | None = None,
 ) -> str:
     """
     Add account/mailbox WHERE clauses to a SQL query.
@@ -41,18 +134,10 @@ def add_account_mailbox_filter(
         account: Optional account filter
         mailbox: Optional mailbox filter
         table_alias: Table alias prefix (default: "e")
+        exclude_mailboxes: Optional list of mailboxes to exclude
 
     Returns:
         Updated SQL string with added WHERE clauses
-
-    Example:
-        >>> sql = "SELECT * FROM emails e WHERE 1=1"
-        >>> params = []
-        >>> sql = add_account_mailbox_filter(sql, params, "Work", "INBOX")
-        >>> sql
-        "SELECT * FROM emails e WHERE 1=1 AND e.account = ? AND e.mailbox = ?"
-        >>> params
-        ["Work", "INBOX"]
     """
     if account:
         sql += f" AND {table_alias}.account = ?"
@@ -60,6 +145,10 @@ def add_account_mailbox_filter(
     if mailbox:
         sql += f" AND {table_alias}.mailbox = ?"
         params.append(mailbox)
+    if exclude_mailboxes:
+        placeholders = ", ".join("?" for _ in exclude_mailboxes)
+        sql += f" AND {table_alias}.mailbox NOT IN ({placeholders})"
+        params.extend(exclude_mailboxes)
     return sql
 
 
@@ -78,12 +167,15 @@ class SearchResult:
 
 
 def sanitize_fts_query(query: str) -> str:
-    """
-    Sanitize a query string for safe FTS5 use.
+    """Sanitize a query string for safe FTS5 use.
 
-    Escapes special characters to prevent syntax errors.
-    Boolean operators (OR, AND, NOT) are preserved since they
-    don't contain special characters.
+    Preserves:
+    - Balanced double-quoted phrases: ``"exact phrase"``
+    - Trailing ``*`` for prefix search: ``meet*``
+    - Boolean operators: ``OR``, ``AND``, ``NOT``
+
+    Escapes:
+    - Unbalanced quotes, colons, carets, parentheses, single quotes
 
     Args:
         query: Raw user query
@@ -91,18 +183,21 @@ def sanitize_fts_query(query: str) -> str:
     Returns:
         Sanitized query safe for FTS5
     """
-    if not query:
+    if not query or not query.strip():
         return ""
 
-    # Remove leading/trailing whitespace
     query = query.strip()
+    tokens = _tokenize_fts_query(query)
 
-    # Escape all FTS5 special characters
-    # Boolean operators (OR, AND, NOT) are unaffected since they
-    # don't contain any of these chars: " ' - * ( ) : ^
-    sanitized = FTS5_SPECIAL_CHARS.sub(r"\\\1", query)
+    sanitized_parts: list[str] = []
+    for token in tokens:
+        if token.startswith('"') and token.endswith('"'):
+            # Already a balanced phrase — pass through
+            sanitized_parts.append(token)
+        else:
+            sanitized_parts.append(_sanitize_bare_token(token))
 
-    return sanitized
+    return " ".join(sanitized_parts)
 
 
 def _extract_snippet(content: str, max_length: int = 150) -> str:
@@ -127,6 +222,7 @@ def search_fts(
     mailbox: str | None = None,
     limit: int = 20,
     *,
+    exclude_mailboxes: list[str] | None = None,
     _is_retry: bool = False,
 ) -> list[SearchResult]:
     """
@@ -171,7 +267,13 @@ def search_fts(
     """
 
     params: list = [safe_query]
-    sql = add_account_mailbox_filter(sql, params, account, mailbox)
+    sql = add_account_mailbox_filter(
+        sql,
+        params,
+        account,
+        mailbox,
+        exclude_mailboxes=exclude_mailboxes,
+    )
     sql += " ORDER BY score DESC LIMIT ?"
     params.append(limit)
 
@@ -182,30 +284,31 @@ def search_fts(
         for row in cursor:
             results.append(
                 SearchResult(
-                    id=row[0],
-                    account=row[1],
-                    mailbox=row[2],
-                    subject=row[3] or "",
-                    sender=row[4] or "",
-                    content_snippet=_extract_snippet(row[5]),
-                    date_received=row[6] or "",
-                    score=round(row[7], 3),
+                    id=row["message_id"],
+                    account=row["account"],
+                    mailbox=row["mailbox"],
+                    subject=row["subject"] or "",
+                    sender=row["sender"] or "",
+                    content_snippet=_extract_snippet(row["content"]),
+                    date_received=row["date_received"] or "",
+                    score=round(row["score"], 3),
                 )
             )
 
         return results
 
     except sqlite3.OperationalError as e:
-        # FTS5 syntax error - try with phrase search as fallback
+        # FTS5 syntax error — retry with aggressive per-term escaping
+        # (preserves multi-term semantics unlike wrapping in quotes)
         if "fts5: syntax error" in str(e).lower() and not _is_retry:
-            # Wrap entire query in quotes as a phrase search
-            escaped_query = '"' + query.replace('"', '""') + '"'
+            escaped_query = _escape_all_special(query)
             return search_fts(
                 conn,
                 escaped_query,
                 account=account,
                 mailbox=mailbox,
                 limit=limit,
+                exclude_mailboxes=exclude_mailboxes,
                 _is_retry=True,
             )
         raise

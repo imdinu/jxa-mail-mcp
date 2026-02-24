@@ -28,6 +28,7 @@ from ..config import (
     get_index_staleness_hours,
 )
 from .schema import (
+    INSERT_ATTACHMENT_SQL,
     INSERT_EMAIL_SQL,
     init_database,
     optimize_fts_index,
@@ -87,7 +88,7 @@ class IndexManager:
         self._conn: sqlite3.Connection | None = None
         self._conn_lock = threading.Lock()
         self._watcher: IndexWatcher | None = None
-        self._watcher_callback: Callable | None = None
+        self._watcher_callback: Callable[[int, int], None] | None = None
 
     @classmethod
     def get_instance(cls) -> IndexManager:
@@ -168,7 +169,10 @@ class IndexManager:
             return True
         return stats.staleness_hours > get_index_staleness_hours()
 
-    def build_from_disk(self, progress_callback: callable | None = None) -> int:
+    def build_from_disk(
+        self,
+        progress_callback: Callable[[int, int | None, str], None] | None = None,
+    ) -> int:
         """
         Build the index by reading .emlx files directly from disk.
 
@@ -198,6 +202,7 @@ class IndexManager:
         total_indexed = 0
 
         # Clear existing data for rebuild
+        conn.execute("DELETE FROM attachments")
         conn.execute("DELETE FROM emails")
         conn.execute("DELETE FROM sync_state")
 
@@ -206,12 +211,14 @@ class IndexManager:
         conn.execute("DROP TRIGGER IF EXISTS emails_ad")
         conn.execute("DROP TRIGGER IF EXISTS emails_au")
 
-        try:
-            batch: list[tuple] = []
-            batch_size = 500
+        batch: list[tuple] = []
+        # Deferred attachment rows: (email_tuple_index, attachments)
+        batch_attachments: list[tuple[int, list]] = []
+        batch_size = 500
 
-            for email in scan_all_emails(mail_dir):
-                key = (email["account"], email["mailbox"])
+        try:
+            for email_data in scan_all_emails(mail_dir):
+                key = (email_data["account"], email_data["mailbox"])
                 count = mailbox_counts.get(key, 0)
 
                 if count >= max_per_mailbox:
@@ -219,22 +226,25 @@ class IndexManager:
 
                 mailbox_counts[key] = count + 1
 
+                attachments = email_data.get("attachments", [])
                 batch.append(
                     (
-                        email["id"],  # message_id from .emlx filename
-                        email["account"],
-                        email["mailbox"],
-                        email.get("subject", ""),
-                        email.get("sender", ""),
-                        email.get("content", ""),
-                        email.get("date_received", ""),
-                        email.get("emlx_path", ""),  # Store path for disk sync
+                        email_data["id"],
+                        email_data["account"],
+                        email_data["mailbox"],
+                        email_data.get("subject", ""),
+                        email_data.get("sender", ""),
+                        email_data.get("content", ""),
+                        email_data.get("date_received", ""),
+                        email_data.get("emlx_path", ""),
+                        len(attachments),
                     )
                 )
+                if attachments:
+                    batch_attachments.append((len(batch) - 1, attachments))
 
                 if len(batch) >= batch_size:
-                    conn.executemany(INSERT_EMAIL_SQL, batch)
-                    conn.commit()
+                    self._flush_batch(conn, batch, batch_attachments)
                     total_indexed += len(batch)
 
                     if progress_callback:
@@ -242,33 +252,37 @@ class IndexManager:
                         progress_callback(total_indexed, None, msg)
 
                     batch = []
-
-            # Insert remaining batch
-            if batch:
-                conn.executemany(INSERT_EMAIL_SQL, batch)
-                total_indexed += len(batch)
-
-            # Update sync state
-            now = datetime.now().isoformat()
-            for (account, mailbox), count in mailbox_counts.items():
-                conn.execute(
-                    """INSERT OR REPLACE INTO sync_state
-                       (account, mailbox, last_sync, message_count)
-                       VALUES (?, ?, ?, ?)""",
-                    (account, mailbox, now, count),
-                )
-
-            conn.commit()
-
-            # Rebuild FTS index
-            if progress_callback:
-                msg = "Building search index..."
-                progress_callback(total_indexed, total_indexed, msg)
-
-            rebuild_fts_index(conn)
-            optimize_fts_index(conn)
+                    batch_attachments = []
 
         finally:
+            # Flush any remaining partial batch (crash-safe)
+            if batch:
+                self._flush_batch(conn, batch, batch_attachments)
+                total_indexed += len(batch)
+
+            # Update sync state for whatever we managed to index
+            if mailbox_counts:
+                now = datetime.now().isoformat()
+                for (account, mailbox), count in mailbox_counts.items():
+                    conn.execute(
+                        """INSERT OR REPLACE INTO sync_state
+                           (account, mailbox, last_sync, message_count)
+                           VALUES (?, ?, ?, ?)""",
+                        (account, mailbox, now, count),
+                    )
+                conn.commit()
+
+            # Rebuild FTS index (must run even if scan crashed
+            # mid-iteration, otherwise emails table has rows
+            # but FTS5 is empty)
+            if total_indexed > 0:
+                if progress_callback:
+                    msg = "Building search index..."
+                    progress_callback(total_indexed, total_indexed, msg)
+
+                rebuild_fts_index(conn)
+                optimize_fts_index(conn)
+
             # Re-enable triggers (use rowid, not message_id)
             conn.executescript("""
                 CREATE TRIGGER IF NOT EXISTS emails_ai
@@ -302,7 +316,52 @@ class IndexManager:
 
         return total_indexed
 
-    def sync_updates(self, progress_callback: callable | None = None) -> int:
+    @staticmethod
+    def _flush_batch(
+        conn: sqlite3.Connection,
+        batch: list[tuple],
+        batch_attachments: list[tuple[int, list]],
+    ) -> None:
+        """Insert a batch of emails and their attachment metadata."""
+        conn.executemany(INSERT_EMAIL_SQL, batch)
+
+        if batch_attachments:
+            # For each email that had attachments, look up its rowid
+            # and insert attachment rows
+            for idx, attachments in batch_attachments:
+                row_tuple = batch[idx]
+                msg_id, account, mailbox = (
+                    row_tuple[0],
+                    row_tuple[1],
+                    row_tuple[2],
+                )
+                cursor = conn.execute(
+                    "SELECT rowid FROM emails "
+                    "WHERE message_id = ? AND account = ? "
+                    "AND mailbox = ?",
+                    (msg_id, account, mailbox),
+                )
+                row = cursor.fetchone()
+                if row:
+                    rowid = row[0]
+                    for att in attachments:
+                        conn.execute(
+                            INSERT_ATTACHMENT_SQL,
+                            (
+                                rowid,
+                                att.filename,
+                                att.mime_type,
+                                att.file_size,
+                                att.content_id,
+                            ),
+                        )
+
+        conn.commit()
+
+    def sync_updates(
+        self,
+        progress_callback: Callable[[int, int | None, str], None] | None = None,
+    ) -> int:
         """
         Sync index with disk using state reconciliation.
 
@@ -342,6 +401,7 @@ class IndexManager:
         account: str | None = None,
         mailbox: str | None = None,
         limit: int = 20,
+        exclude_mailboxes: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Search indexed emails using FTS5.
@@ -351,6 +411,7 @@ class IndexManager:
             account: Optional account filter
             mailbox: Optional mailbox filter
             limit: Maximum results (default: 20)
+            exclude_mailboxes: Mailboxes to exclude from results
 
         Returns:
             List of SearchResult ordered by relevance (BM25 score)
@@ -363,13 +424,14 @@ class IndexManager:
             account=account,
             mailbox=mailbox,
             limit=limit,
+            exclude_mailboxes=exclude_mailboxes,
         )
 
     def rebuild(
         self,
         account: str | None = None,
         mailbox: str | None = None,
-        progress_callback: callable | None = None,
+        progress_callback: Callable[[int, int | None, str], None] | None = None,
     ) -> int:
         """
         Force rebuild of the index.

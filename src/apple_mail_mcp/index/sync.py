@@ -148,14 +148,16 @@ def sync_from_disk(
     for row in cursor:
         mailbox_counts[(row["account"], row["mailbox"])] = row["cnt"]
 
-    # Sort new emails by mtime (newest first) so the cap keeps recent ones
-    sorted_new = sorted(
-        new_keys,
-        key=lambda k: Path(disk_inv[k]).stat().st_mtime
-        if Path(disk_inv[k]).exists()
-        else 0,
-        reverse=True,
-    )
+    # Sort new emails by mtime (newest first) so the cap keeps recent ones.
+    # Wrap stat() in try/except to handle files deleted between discovery
+    # and sorting (race-tolerant).
+    def _safe_mtime(k: tuple) -> float:
+        try:
+            return Path(disk_inv[k]).stat().st_mtime
+        except OSError:
+            return 0
+
+    sorted_new = sorted(new_keys, key=_safe_mtime, reverse=True)
 
     skipped_per_mailbox: dict[tuple[str, str], int] = {}
 

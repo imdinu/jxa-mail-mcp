@@ -375,28 +375,28 @@ async def get_email(
         pass  # Fall through to strategy 2
 
     # Strategy 2: Index lookup — find the email's real location
-    # Note: message_id is only unique within (account, mailbox), so
-    # we scope the lookup when the caller provides those parameters.
+    # Only scope by account/mailbox when the caller explicitly provided them
+    # (not when they were filled in from defaults — strategy 1 already tried
+    # the default location and failed).
     try:
         manager = _get_index_manager()
         if manager.has_index():
             conn = manager._get_conn()
 
-            # Build scoped query to avoid ambiguous matches
             where = ["message_id = ?"]
             params: list = [message_id]
 
             acct_map = _get_account_map()
             await acct_map.ensure_loaded()
 
-            if resolved_account:
-                idx_acct = acct_map.name_to_uuid(resolved_account)
+            if account is not None:
+                idx_acct = acct_map.name_to_uuid(account)
                 if idx_acct:
                     where.append("account = ?")
                     params.append(idx_acct)
-            if resolved_mailbox:
+            if mailbox is not None:
                 where.append("mailbox = ?")
-                params.append(resolved_mailbox)
+                params.append(mailbox)
 
             sql = (
                 "SELECT account, mailbox FROM emails WHERE "

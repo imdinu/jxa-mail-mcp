@@ -375,23 +375,40 @@ async def get_email(
         pass  # Fall through to strategy 2
 
     # Strategy 2: Index lookup — find the email's real location
+    # Note: message_id is only unique within (account, mailbox), so
+    # we scope the lookup when the caller provides those parameters.
     try:
         manager = _get_index_manager()
         if manager.has_index():
             conn = manager._get_conn()
-            cursor = conn.execute(
-                "SELECT account, mailbox FROM emails "
-                "WHERE message_id = ? LIMIT 1",
-                (message_id,),
+
+            # Build scoped query to avoid ambiguous matches
+            where = ["message_id = ?"]
+            params: list = [message_id]
+
+            acct_map = _get_account_map()
+            await acct_map.ensure_loaded()
+
+            if resolved_account:
+                idx_acct = acct_map.name_to_uuid(resolved_account)
+                if idx_acct:
+                    where.append("account = ?")
+                    params.append(idx_acct)
+            if resolved_mailbox:
+                where.append("mailbox = ?")
+                params.append(resolved_mailbox)
+
+            sql = (
+                "SELECT account, mailbox FROM emails WHERE "
+                + " AND ".join(where)
+                + " LIMIT 1"
             )
+            cursor = conn.execute(sql, params)
             row = cursor.fetchone()
             if row:
                 idx_account = row["account"]
                 idx_mailbox = row["mailbox"]
 
-                # Translate UUID → friendly name for JXA
-                acct_map = _get_account_map()
-                await acct_map.ensure_loaded()
                 friendly_account = acct_map.uuid_to_name(idx_account)
 
                 setup = build_mailbox_setup_js(friendly_account, idx_mailbox)
@@ -501,16 +518,30 @@ async def get_attachment(
     """
     from .index.disk import get_attachment_content
 
-    # Look up emlx_path from the index
+    # Look up emlx_path from the index, scoped by account/mailbox
+    # when provided (message_id is only unique within a mailbox)
     manager = _get_index_manager()
     if not manager.has_index():
         raise ValueError("No search index. Run 'apple-mail-mcp index'.")
 
     conn = manager._get_conn()
-    cursor = conn.execute(
-        "SELECT emlx_path FROM emails WHERE message_id = ? LIMIT 1",
-        (message_id,),
+
+    where = ["message_id = ?"]
+    params: list = [message_id]
+    if account:
+        acct_map = _get_account_map()
+        await acct_map.ensure_loaded()
+        idx_acct = acct_map.name_to_uuid(account) or account
+        where.append("account = ?")
+        params.append(idx_acct)
+    if mailbox:
+        where.append("mailbox = ?")
+        params.append(mailbox)
+
+    sql = (
+        "SELECT emlx_path FROM emails WHERE " + " AND ".join(where) + " LIMIT 1"
     )
+    cursor = conn.execute(sql, params)
     row = cursor.fetchone()
     if not row or not row["emlx_path"]:
         raise ValueError(f"Email {message_id} not found in index.")
@@ -560,17 +591,20 @@ async def search(
     Args:
         query: Search term or phrase
         account: Account name (optional filter).
-            None means search ALL accounts (ignores default).
+            For FTS scopes (all/body/attachments): None searches all accounts.
+            For JXA scopes (subject/sender): None uses the default account.
         mailbox: Mailbox name (optional filter).
-            None means search ALL mailboxes.
+            For FTS scopes (all/body/attachments): None searches all mailboxes.
+            For JXA scopes (subject/sender): None uses the default mailbox.
         scope: Where to search:
             - "all": Search subject, sender, AND body (default, uses FTS5)
-            - "subject": Search subject only
-            - "sender": Search sender only
-            - "body": Search body content only
-            - "attachments": Search by attachment filename
+            - "subject": Search subject only (JXA, single mailbox)
+            - "sender": Search sender only (JXA, single mailbox)
+            - "body": Search body content only (FTS5)
+            - "attachments": Search by attachment filename (SQL)
         limit: Maximum results (default: 20)
-        exclude_mailboxes: Mailboxes to exclude (default: ["Drafts"])
+        exclude_mailboxes: Mailboxes to exclude (default: ["Drafts"]).
+            Only applies to FTS and attachment scopes.
 
     Returns:
         List of matching emails sorted by relevance (when using FTS5)
@@ -612,6 +646,10 @@ async def search(
         if mailbox:
             sql += " AND e.mailbox = ?"
             params.append(mailbox)
+        if exclude_mailboxes:
+            placeholders = ",".join("?" for _ in exclude_mailboxes)
+            sql += f" AND e.mailbox NOT IN ({placeholders})"
+            params.extend(exclude_mailboxes)
 
         sql += " ORDER BY e.date_received DESC LIMIT ?"
         params.append(limit)

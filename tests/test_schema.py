@@ -203,6 +203,42 @@ class TestInitDatabase:
         assert perms == 0o600, f"Expected 0600, got {oct(perms)}"
 
 
+class TestForeignKeys:
+    """Tests for foreign key enforcement."""
+
+    def test_foreign_keys_pragma_enabled(self, temp_db: sqlite3.Connection):
+        """PRAGMA foreign_keys should be ON for CASCADE support."""
+        cursor = temp_db.execute("PRAGMA foreign_keys")
+        assert cursor.fetchone()[0] == 1
+
+    def test_cascade_deletes_attachments(self, temp_db: sqlite3.Connection):
+        """Deleting an email should cascade-delete its attachments."""
+        temp_db.execute(
+            """INSERT INTO emails
+               (message_id, account, mailbox, subject)
+               VALUES (1, 'acc', 'INBOX', 'With attachment')"""
+        )
+        rowid = temp_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        temp_db.execute(
+            "INSERT INTO attachments (email_rowid, filename) VALUES (?, ?)",
+            (rowid, "doc.pdf"),
+        )
+        temp_db.commit()
+
+        # Verify attachment exists
+        count = temp_db.execute("SELECT COUNT(*) FROM attachments").fetchone()
+        assert count[0] == 1
+
+        # Delete the email — attachment should cascade
+        temp_db.execute(
+            "DELETE FROM emails WHERE message_id = 1 AND account = 'acc'"
+        )
+        temp_db.commit()
+
+        count = temp_db.execute("SELECT COUNT(*) FROM attachments").fetchone()
+        assert count[0] == 0
+
+
 class TestFtsOperations:
     """Tests for FTS maintenance operations."""
 

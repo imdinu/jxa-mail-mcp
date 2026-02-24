@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from apple_mail_mcp.index.schema import (
+    DEFAULT_PRAGMAS,
     INSERT_EMAIL_SQL,
     SCHEMA_VERSION,
     get_schema_sql,
@@ -16,9 +17,12 @@ from apple_mail_mcp.index.schema import (
 
 @pytest.fixture
 def temp_db():
-    """Create an in-memory database with the schema."""
+    """Create an in-memory database with the schema and standard PRAGMAs."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    for pragma, value in DEFAULT_PRAGMAS.items():
+        if pragma != "journal_mode":  # WAL not supported for :memory:
+            conn.execute(f"PRAGMA {pragma}={value}")
     conn.executescript(get_schema_sql())
     conn.execute(
         "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)

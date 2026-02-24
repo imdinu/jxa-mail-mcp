@@ -24,6 +24,7 @@ DEFAULT_PRAGMAS = {
     "journal_mode": "WAL",  # Better concurrent read performance
     "synchronous": "NORMAL",  # Good balance of safety and speed
     "busy_timeout": 5000,  # Wait up to 5s for locks
+    "foreign_keys": "ON",  # Required for ON DELETE CASCADE
 }
 
 # Centralized SQL for email insertion (used by manager, sync, watcher)

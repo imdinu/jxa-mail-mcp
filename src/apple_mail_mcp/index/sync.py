@@ -157,7 +157,7 @@ def sync_from_disk(
         reverse=True,
     )
 
-    capped_mailboxes: set[tuple[str, str]] = set()
+    skipped_per_mailbox: dict[tuple[str, str], int] = {}
 
     # Process NEW emails (parse content and insert)
     for key in sorted_new:
@@ -168,7 +168,7 @@ def sync_from_disk(
         mb_key = (account, mailbox)
         current_count = mailbox_counts.get(mb_key, 0)
         if current_count >= max_per_mailbox:
-            capped_mailboxes.add(mb_key)
+            skipped_per_mailbox[mb_key] = skipped_per_mailbox.get(mb_key, 0) + 1
             continue
 
         try:
@@ -218,13 +218,7 @@ def sync_from_disk(
             progress_callback(processed, total_ops, f"Added {added} emails...")
 
     # Log cap warnings for mailboxes that hit the limit
-    for mb_key in capped_mailboxes:
-        skipped = sum(
-            1
-            for k in sorted_new
-            if (k[0], k[1]) == mb_key
-            and mailbox_counts.get(mb_key, 0) >= max_per_mailbox
-        )
+    for mb_key, skipped in skipped_per_mailbox.items():
         logger.warning(
             "Mailbox %s/%s hit cap (%d). %d new emails skipped. "
             "Increase APPLE_MAIL_INDEX_MAX_EMAILS to index more.",

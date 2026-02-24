@@ -16,7 +16,7 @@ src/apple_mail_mcp/
 ├── executor.py         # run_jxa(), execute_with_core(), execute_query()
 ├── index/              # FTS5 search index module
 │   ├── __init__.py     # Exports IndexManager
-│   ├── schema.py       # SQLite schema v3 (emlx_path column)
+│   ├── schema.py       # SQLite schema v4 (attachment support)
 │   ├── manager.py      # IndexManager class (disk-based sync)
 │   ├── disk.py         # .emlx reading + get_disk_inventory()
 │   ├── sync.py         # Disk-based state reconciliation
@@ -27,15 +27,16 @@ src/apple_mail_mcp/
     └── mail_core.js    # Shared JXA utilities (MailCore object)
 ```
 
-## MCP Tools (5 total)
+## MCP Tools (6 total)
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
 | `list_accounts()` | List email accounts | - |
 | `list_mailboxes(account?)` | List mailboxes | account (optional) |
 | `get_emails(...)` | Unified listing | filter: all/unread/flagged/today/this_week |
-| `get_email(id)` | Full email content | message_id |
-| `search(query, ...)` | Unified search | scope: all/subject/sender/body |
+| `get_email(id)` | Full email content + attachments | message_id |
+| `search(query, ...)` | Unified search | scope: all/subject/sender/body/attachments |
+| `get_attachment(id, filename)` | Extract attachment content | message_id, filename |
 
 ### get_emails() Filters
 
@@ -54,6 +55,7 @@ search("invoice")                          # Search everywhere (FTS5)
 search("john@", scope="sender")            # Sender only (JXA)
 search("meeting", scope="subject")         # Subject only (JXA)
 search("deadline", scope="body")           # Body only (FTS5)
+search("pdf", scope="attachments")         # By attachment filename (SQL)
 ```
 
 ## Architecture
@@ -140,7 +142,7 @@ Server startup → IndexManager.sync_updates()
 
 ## FTS5 Search Index
 
-### Database Schema (v3)
+### Database Schema (v4)
 
 ```sql
 -- Email content cache
@@ -154,11 +156,24 @@ CREATE TABLE emails (
     content TEXT,                    -- Body text
     date_received TEXT,
     emlx_path TEXT,                  -- Path for sync
+    attachment_count INTEGER DEFAULT 0,
     indexed_at TEXT DEFAULT (datetime('now')),
     UNIQUE(account, mailbox, message_id)
 );
 
 CREATE INDEX idx_emails_path ON emails(emlx_path);
+
+-- Attachment metadata (one-to-many from emails)
+CREATE TABLE attachments (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_rowid INTEGER NOT NULL REFERENCES emails(rowid) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    mime_type TEXT,
+    file_size INTEGER,
+    content_id TEXT
+);
+CREATE INDEX idx_attachments_email ON attachments(email_rowid);
+CREATE INDEX idx_attachments_filename ON attachments(filename);
 
 -- FTS5 index (external content - shares storage with emails table)
 CREATE VIRTUAL TABLE emails_fts USING fts5(
@@ -403,6 +418,7 @@ for (let i = 0; i < data.sender.length; i++) {
 | `APPLE_MAIL_INDEX_PATH` | `~/.apple-mail-mcp/index.db` | Index database location |
 | `APPLE_MAIL_INDEX_MAX_EMAILS` | `5000` | Max emails per mailbox |
 | `APPLE_MAIL_INDEX_STALENESS_HOURS` | `24` | Hours before refresh |
+| `APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES` | `Drafts` | Comma-separated mailboxes to skip |
 
 ## Benchmarks
 

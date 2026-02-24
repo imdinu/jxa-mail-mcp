@@ -65,6 +65,22 @@ def get_index_max_emails() -> int:
     return int(os.environ.get("APPLE_MAIL_INDEX_MAX_EMAILS", "5000"))
 
 
+def get_index_exclude_mailboxes() -> set[str]:
+    """
+    Get mailboxes to exclude from indexing.
+
+    Set APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES to a comma-separated list.
+    Defaults to "Drafts".
+
+    Returns:
+        Set of mailbox names to exclude.
+    """
+    env_val = os.environ.get("APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES")
+    if env_val is not None:
+        return {m.strip() for m in env_val.split(",") if m.strip()}
+    return {"Drafts"}
+
+
 def get_index_staleness_hours() -> float:
     """
     Get the staleness threshold for the index.

@@ -11,6 +11,7 @@ import pytest
 
 from apple_mail_mcp.index.schema import (
     SCHEMA_VERSION,
+    _run_migrations,
     init_database,
     optimize_fts_index,
     rebuild_fts_index,
@@ -20,14 +21,15 @@ from apple_mail_mcp.index.schema import (
 class TestSchemaSQL:
     """Tests for schema SQL generation."""
 
-    @pytest.mark.parametrize("table", ["emails", "emails_fts", "sync_state"])
+    @pytest.mark.parametrize(
+        "table", ["emails", "emails_fts", "sync_state", "attachments"]
+    )
     def test_schema_creates_required_tables(
         self, temp_db: sqlite3.Connection, table
     ):
         """Schema creates all required tables."""
         cursor = temp_db.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name=?",
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
             (table,),
         )
         assert cursor.fetchone() is not None
@@ -201,6 +203,42 @@ class TestInitDatabase:
         assert perms == 0o600, f"Expected 0600, got {oct(perms)}"
 
 
+class TestForeignKeys:
+    """Tests for foreign key enforcement."""
+
+    def test_foreign_keys_pragma_enabled(self, temp_db: sqlite3.Connection):
+        """PRAGMA foreign_keys should be ON for CASCADE support."""
+        cursor = temp_db.execute("PRAGMA foreign_keys")
+        assert cursor.fetchone()[0] == 1
+
+    def test_cascade_deletes_attachments(self, temp_db: sqlite3.Connection):
+        """Deleting an email should cascade-delete its attachments."""
+        temp_db.execute(
+            """INSERT INTO emails
+               (message_id, account, mailbox, subject)
+               VALUES (1, 'acc', 'INBOX', 'With attachment')"""
+        )
+        rowid = temp_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        temp_db.execute(
+            "INSERT INTO attachments (email_rowid, filename) VALUES (?, ?)",
+            (rowid, "doc.pdf"),
+        )
+        temp_db.commit()
+
+        # Verify attachment exists
+        count = temp_db.execute("SELECT COUNT(*) FROM attachments").fetchone()
+        assert count[0] == 1
+
+        # Delete the email — attachment should cascade
+        temp_db.execute(
+            "DELETE FROM emails WHERE message_id = 1 AND account = 'acc'"
+        )
+        temp_db.commit()
+
+        count = temp_db.execute("SELECT COUNT(*) FROM attachments").fetchone()
+        assert count[0] == 0
+
+
 class TestFtsOperations:
     """Tests for FTS maintenance operations."""
 
@@ -217,3 +255,75 @@ class TestFtsOperations:
     def test_optimize_fts_index(self, populated_db: sqlite3.Connection):
         # Should not raise
         optimize_fts_index(populated_db)
+
+
+class TestMigrationV3ToV4:
+    """Tests for v3→v4 schema migration (attachment support)."""
+
+    @pytest.fixture
+    def v3_db(self):
+        """Create a v3 database (before attachment support)."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+
+        # Build a v3 schema (emails without attachment_count,
+        # no attachments table)
+        conn.executescript("""
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY
+            );
+            CREATE TABLE emails (
+                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL,
+                account TEXT NOT NULL,
+                mailbox TEXT NOT NULL,
+                subject TEXT,
+                sender TEXT,
+                content TEXT,
+                date_received TEXT,
+                emlx_path TEXT,
+                indexed_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(account, mailbox, message_id)
+            );
+            CREATE TABLE sync_state (
+                account TEXT NOT NULL,
+                mailbox TEXT NOT NULL,
+                last_sync TEXT,
+                message_count INTEGER DEFAULT 0,
+                PRIMARY KEY(account, mailbox)
+            );
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (3,))
+        # Insert a sample email (v3 format, no attachment_count)
+        conn.execute(
+            "INSERT INTO emails "
+            "(message_id, account, mailbox, subject, emlx_path) "
+            "VALUES (1, 'acc', 'INBOX', 'Old email', '/path.emlx')"
+        )
+        conn.commit()
+        yield conn
+        conn.close()
+
+    def test_migration_adds_attachment_count_column(self, v3_db):
+        _run_migrations(v3_db, 3, SCHEMA_VERSION)
+
+        # attachment_count should exist and default to 0
+        cursor = v3_db.execute(
+            "SELECT attachment_count FROM emails WHERE message_id = 1"
+        )
+        assert cursor.fetchone()[0] == 0
+
+    def test_migration_creates_attachments_table(self, v3_db):
+        _run_migrations(v3_db, 3, SCHEMA_VERSION)
+
+        cursor = v3_db.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='attachments'"
+        )
+        assert cursor.fetchone() is not None
+
+    def test_migration_updates_version(self, v3_db):
+        _run_migrations(v3_db, 3, SCHEMA_VERSION)
+
+        cursor = v3_db.execute("SELECT version FROM schema_version")
+        assert cursor.fetchone()[0] == SCHEMA_VERSION

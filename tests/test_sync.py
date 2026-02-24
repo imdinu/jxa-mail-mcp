@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -147,8 +148,9 @@ class TestSyncFromDisk:
         mail_dir.mkdir(parents=True)
         return mail_dir
 
-    def _create_emlx(self, mail_dir: Path, account: str, mailbox: str,
-                     msg_id: int) -> Path:
+    def _create_emlx(
+        self, mail_dir: Path, account: str, mailbox: str, msg_id: int
+    ) -> Path:
         """Helper to create a valid emlx file."""
         mbox = mail_dir / account / f"{mailbox}.mbox" / "Data" / "Messages"
         mbox.mkdir(parents=True, exist_ok=True)
@@ -159,16 +161,16 @@ class TestSyncFromDisk:
         emlx_path.write_bytes(content)
         return emlx_path
 
-    def test_sync_empty_both(self, sync_db: sqlite3.Connection,
-                              mail_dir: Path):
+    def test_sync_empty_both(self, sync_db: sqlite3.Connection, mail_dir: Path):
         """Sync with empty DB and empty disk should be no-op."""
         result = sync_from_disk(sync_db, mail_dir)
         assert result.added == 0
         assert result.deleted == 0
         assert result.moved == 0
 
-    def test_sync_detects_new_emails(self, sync_db: sqlite3.Connection,
-                                      mail_dir: Path):
+    def test_sync_detects_new_emails(
+        self, sync_db: sqlite3.Connection, mail_dir: Path
+    ):
         """New files on disk should be added to DB."""
         self._create_emlx(mail_dir, "acc1", "INBOX", 1001)
         self._create_emlx(mail_dir, "acc1", "INBOX", 1002)
@@ -181,8 +183,9 @@ class TestSyncFromDisk:
         cursor = sync_db.execute("SELECT COUNT(*) FROM emails")
         assert cursor.fetchone()[0] == 2
 
-    def test_sync_detects_deleted_emails(self, sync_db: sqlite3.Connection,
-                                          mail_dir: Path):
+    def test_sync_detects_deleted_emails(
+        self, sync_db: sqlite3.Connection, mail_dir: Path
+    ):
         """Emails in DB but not on disk should be deleted."""
         # Pre-populate DB with an email that doesn't exist on disk
         sync_db.execute(
@@ -199,8 +202,9 @@ class TestSyncFromDisk:
         cursor = sync_db.execute("SELECT COUNT(*) FROM emails")
         assert cursor.fetchone()[0] == 0
 
-    def test_sync_detects_moved_emails(self, sync_db: sqlite3.Connection,
-                                        mail_dir: Path):
+    def test_sync_detects_moved_emails(
+        self, sync_db: sqlite3.Connection, mail_dir: Path
+    ):
         """Emails with changed paths should be updated."""
         # Create file at new location
         new_path = self._create_emlx(mail_dir, "acc1", "Archive", 1001)
@@ -221,3 +225,31 @@ class TestSyncFromDisk:
             "SELECT emlx_path FROM emails WHERE message_id = 1001"
         )
         assert str(new_path) in cursor.fetchone()[0]
+
+    def test_sync_sorts_new_by_mtime(
+        self, sync_db: sqlite3.Connection, mail_dir: Path
+    ):
+        """With cap=1, the newer file should be indexed."""
+        import os
+        import time
+
+        # Create older file first
+        older = self._create_emlx(mail_dir, "acc1", "INBOX", 1001)
+        time.sleep(0.05)
+        # Create newer file
+        self._create_emlx(mail_dir, "acc1", "INBOX", 1002)
+
+        # Make sure mtime differs
+        os.utime(older, (time.time() - 100, time.time() - 100))
+
+        with patch(
+            "apple_mail_mcp.index.sync.get_index_max_emails",
+            return_value=1,
+        ):
+            result = sync_from_disk(sync_db, mail_dir)
+
+        # Only 1 should be indexed (the newer one, msg 1002)
+        assert result.added == 1
+        cursor = sync_db.execute("SELECT message_id FROM emails")
+        msg_id = cursor.fetchone()["message_id"]
+        assert msg_id == 1002

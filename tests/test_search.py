@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from apple_mail_mcp.index.search import (
+    _escape_all_special,
     count_matches,
     sanitize_fts_query,
     search_fts,
@@ -22,21 +23,39 @@ class TestSanitizeFtsQuery:
         assert sanitize_fts_query("hello world") == "hello world"
 
     def test_escapes_special_characters(self):
-        # Hyphens
-        assert sanitize_fts_query("meeting-notes") == r"meeting\-notes"
-        # Asterisks
-        assert sanitize_fts_query("prefix*") == r"prefix\*"
-        # Colons
-        assert sanitize_fts_query("subject:test") == r"subject\:test"
-        # Quotes
-        assert sanitize_fts_query('say "hello"') == r"say \"hello\""
-        # Parentheses
-        assert sanitize_fts_query("(group)") == r"\(group\)"
-        # Carets
-        assert sanitize_fts_query("boost^2") == r"boost\^2"
+        # Hyphens (FTS5 treats -term as NOT) → quoted
+        assert sanitize_fts_query("meeting-notes") == '"meeting-notes"'
+        # Colons (FTS5 column filter) → quoted
+        assert sanitize_fts_query("subject:test") == '"subject:test"'
+        # Parentheses (FTS5 grouping) → quoted
+        assert sanitize_fts_query("(group)") == '"(group)"'
+        # Carets → quoted
+        assert sanitize_fts_query("boost^2") == '"boost^2"'
+        # Single quotes → quoted
+        assert sanitize_fts_query("it's") == '"it\'s"'
+
+    def test_preserves_phrase_search(self):
+        """Balanced double quotes are kept for phrase search."""
+        result = sanitize_fts_query('"exact phrase"')
+        assert result == '"exact phrase"'
+
+        result = sanitize_fts_query('hello "exact phrase" world')
+        assert '"exact phrase"' in result
+
+    def test_preserves_prefix_wildcard(self):
+        """Trailing * is preserved for prefix search."""
+        assert sanitize_fts_query("meet*") == "meet*"
+        assert sanitize_fts_query("invoice* report") == "invoice* report"
+
+    def test_escapes_unbalanced_quotes(self):
+        """Unbalanced quotes are dropped, not passed through."""
+        result = sanitize_fts_query('test" OR hello')
+        # The stray quote is stripped; terms and operator remain
+        assert '"' not in result or result.count('"') % 2 == 0
+        assert "test" in result
+        assert "hello" in result
 
     def test_preserves_boolean_operators(self):
-        # Boolean operators don't contain special chars, so they're preserved
         result = sanitize_fts_query("hello OR world")
         assert "OR" in result
 
@@ -47,13 +66,31 @@ class TestSanitizeFtsQuery:
         assert "NOT" in result
 
     def test_escapes_injection_attempts(self):
-        # Malicious query trying to use special syntax
-        result = sanitize_fts_query('test" OR *')
-        assert r"\"" in result  # Quote escaped
-        assert r"\*" in result  # Asterisk escaped
+        # Colons are quoted in bare tokens
+        result = sanitize_fts_query("col:value")
+        assert result == '"col:value"'
 
     def test_strips_whitespace(self):
         assert sanitize_fts_query("  hello  ") == "hello"
+
+
+class TestEscapeAllSpecial:
+    """Tests for aggressive last-resort quoting."""
+
+    def test_quotes_every_term(self):
+        result = _escape_all_special("test meet")
+        assert result == '"test" "meet"'
+
+    def test_preserves_operators(self):
+        result = _escape_all_special("hello OR world")
+        assert result == '"hello" OR "world"'
+
+    def test_preserves_individual_terms(self):
+        """Each term is quoted separately, not wrapped in one phrase."""
+        result = _escape_all_special("hello world")
+        # Multiple terms remain multiple terms (each quoted)
+        parts = result.split()
+        assert len(parts) == 2
 
 
 class TestSearchFts:
@@ -122,6 +159,20 @@ class TestSearchFts:
     def test_search_no_results(self, populated_db: sqlite3.Connection):
         results = search_fts(populated_db, "xyznonexistent123")
         assert results == []
+
+    def test_search_fts_excludes_mailboxes(
+        self, populated_db: sqlite3.Connection
+    ):
+        """exclude_mailboxes filters out specified mailboxes."""
+        # "Sent" mailbox has the deadline email
+        all_results = search_fts(populated_db, "deadline")
+        assert any(r.mailbox == "Sent" for r in all_results)
+
+        # Exclude Sent
+        filtered = search_fts(
+            populated_db, "deadline", exclude_mailboxes=["Sent"]
+        )
+        assert all(r.mailbox != "Sent" for r in filtered)
 
 
 class TestCountMatches:

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..config import get_index_max_emails
-from .schema import INSERT_EMAIL_SQL, email_to_row
+from .schema import INSERT_ATTACHMENT_SQL, INSERT_EMAIL_SQL, email_to_row
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,8 +57,8 @@ def get_db_inventory(
 
     inventory: dict[tuple[str, str, int], str] = {}
     for row in cursor:
-        key = (row[0], row[1], row[2])
-        inventory[key] = row[3] or ""
+        key = (row["account"], row["mailbox"], row["message_id"])
+        inventory[key] = row["emlx_path"] or ""
 
     return inventory
 
@@ -142,14 +142,27 @@ def sync_from_disk(
 
     # Get current counts per mailbox
     cursor = conn.execute(
-        "SELECT account, mailbox, COUNT(*) FROM emails "
+        "SELECT account, mailbox, COUNT(*) as cnt FROM emails "
         "GROUP BY account, mailbox"
     )
     for row in cursor:
-        mailbox_counts[(row[0], row[1])] = row[2]
+        mailbox_counts[(row["account"], row["mailbox"])] = row["cnt"]
+
+    # Sort new emails by mtime (newest first) so the cap keeps recent ones.
+    # Wrap stat() in try/except to handle files deleted between discovery
+    # and sorting (race-tolerant).
+    def _safe_mtime(k: tuple) -> float:
+        try:
+            return Path(disk_inv[k]).stat().st_mtime
+        except OSError:
+            return 0
+
+    sorted_new = sorted(new_keys, key=_safe_mtime, reverse=True)
+
+    skipped_per_mailbox: dict[tuple[str, str], int] = {}
 
     # Process NEW emails (parse content and insert)
-    for key in new_keys:
+    for key in sorted_new:
         account, mailbox, msg_id = key
         path = disk_inv[key]
 
@@ -157,11 +170,13 @@ def sync_from_disk(
         mb_key = (account, mailbox)
         current_count = mailbox_counts.get(mb_key, 0)
         if current_count >= max_per_mailbox:
+            skipped_per_mailbox[mb_key] = skipped_per_mailbox.get(mb_key, 0) + 1
             continue
 
         try:
             parsed = parse_emlx(Path(path))
             if parsed:
+                attachments = parsed.attachments or []
                 row = email_to_row(
                     {
                         "id": parsed.id,
@@ -173,17 +188,47 @@ def sync_from_disk(
                     account,
                     mailbox,
                     path,
+                    attachment_count=len(attachments),
                 )
                 conn.execute(INSERT_EMAIL_SQL, row)
+
+                # Insert attachment metadata
+                if attachments:
+                    rowid = conn.execute(
+                        "SELECT last_insert_rowid()"
+                    ).fetchone()[0]
+                    for att in attachments:
+                        conn.execute(
+                            INSERT_ATTACHMENT_SQL,
+                            (
+                                rowid,
+                                att.filename,
+                                att.mime_type,
+                                att.file_size,
+                                att.content_id,
+                            ),
+                        )
+
                 added += 1
                 mailbox_counts[mb_key] = current_count + 1
-        except Exception as e:
+        except (OSError, ValueError, UnicodeDecodeError) as e:
             logger.debug("Failed to parse %s: %s", path, e)
             errors += 1
 
         processed += 1
         if progress_callback and processed % 100 == 0:
             progress_callback(processed, total_ops, f"Added {added} emails...")
+
+    # Log cap warnings for mailboxes that hit the limit
+    for mb_key, skipped in skipped_per_mailbox.items():
+        logger.warning(
+            "Mailbox %s/%s hit cap (%d). %d new emails skipped. "
+            "Increase APPLE_MAIL_INDEX_MAX_EMAILS to index more.",
+            mb_key[0],
+            mb_key[1],
+            max_per_mailbox,
+            skipped,
+        )
 
     # Process DELETED emails (remove from DB)
     for key in deleted_keys:

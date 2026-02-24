@@ -17,26 +17,36 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Current schema version for migrations
-SCHEMA_VERSION = 3  # Bumped for emlx_path column (disk-first sync)
+SCHEMA_VERSION = 4  # Bumped for attachment support
 
 # Default PRAGMAs for all connections (centralized to avoid drift)
 DEFAULT_PRAGMAS = {
     "journal_mode": "WAL",  # Better concurrent read performance
     "synchronous": "NORMAL",  # Good balance of safety and speed
     "busy_timeout": 5000,  # Wait up to 5s for locks
+    "foreign_keys": "ON",  # Required for ON DELETE CASCADE
 }
 
 # Centralized SQL for email insertion (used by manager, sync, watcher)
 # Uses INSERT OR REPLACE for idempotent upserts on composite key
 INSERT_EMAIL_SQL = """INSERT OR REPLACE INTO emails
     (message_id, account, mailbox, subject, sender, content, date_received,
-     emlx_path)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+     emlx_path, attachment_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+# SQL for inserting attachment metadata
+INSERT_ATTACHMENT_SQL = """INSERT INTO attachments
+    (email_rowid, filename, mime_type, file_size, content_id)
+    VALUES (?, ?, ?, ?, ?)"""
 
 
 def email_to_row(
-    email: dict, account: str, mailbox: str, emlx_path: str | None = None
-) -> tuple[int, str, str, str, str, str, str, str | None]:
+    email: dict,
+    account: str,
+    mailbox: str,
+    emlx_path: str | None = None,
+    attachment_count: int = 0,
+) -> tuple[int, str, str, str, str, str, str, str | None, int]:
     """
     Convert an email dict to a database row tuple.
 
@@ -50,6 +60,7 @@ def email_to_row(
         account: Account name/identifier
         mailbox: Mailbox name
         emlx_path: Path to the .emlx file on disk (for disk-first sync)
+        attachment_count: Number of attachments in the email
 
     Returns:
         Tuple matching INSERT_EMAIL_SQL parameter order
@@ -63,6 +74,7 @@ def email_to_row(
         email.get("content", ""),
         email.get("date_received", ""),
         emlx_path,
+        attachment_count,
     )
 
 
@@ -110,6 +122,7 @@ CREATE TABLE IF NOT EXISTS emails (
     content TEXT,                    -- Body text
     date_received TEXT,
     emlx_path TEXT,                  -- Path to .emlx file (for disk-first sync)
+    attachment_count INTEGER DEFAULT 0,
     indexed_at TEXT DEFAULT (datetime('now')),
     UNIQUE(account, mailbox, message_id)  -- Composite uniqueness
 );
@@ -152,6 +165,20 @@ CREATE TRIGGER IF NOT EXISTS emails_au AFTER UPDATE ON emails BEGIN
     INSERT INTO emails_fts(rowid, subject, sender, content)
     VALUES (new.rowid, new.subject, new.sender, new.content);
 END;
+
+-- Attachment metadata (one-to-many from emails)
+CREATE TABLE IF NOT EXISTS attachments (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_rowid INTEGER NOT NULL REFERENCES emails(rowid) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    mime_type TEXT,
+    file_size INTEGER,
+    content_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_email
+    ON attachments(email_rowid);
+CREATE INDEX IF NOT EXISTS idx_attachments_filename
+    ON attachments(filename);
 
 -- Sync state tracking per mailbox
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -274,6 +301,44 @@ def _run_migrations(
         logger.info(
             "Migration v2→v3 complete. Run 'apple-mail-mcp rebuild' "
             "to populate emlx_path for existing emails."
+        )
+
+    if from_version < 4:
+        # Migration from v3 to v4: Add attachment support
+        logger.info("Migrating schema v3→v4: adding attachment support")
+
+        # Add attachment_count to emails (nullable default 0)
+        conn.execute(
+            "ALTER TABLE emails ADD COLUMN attachment_count INTEGER DEFAULT 0"
+        )
+
+        # Create attachments table
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS attachments (
+                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_rowid INTEGER NOT NULL
+                    REFERENCES emails(rowid) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                mime_type TEXT,
+                file_size INTEGER,
+                content_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_attachments_email
+                ON attachments(email_rowid);
+            CREATE INDEX IF NOT EXISTS idx_attachments_filename
+                ON attachments(filename);
+        """)
+
+        logger.info("Migration v3→v4 complete.")
+        import sys
+
+        print(
+            "\n⚠ Upgraded to schema v4 (attachment support).\n"
+            "  Run 'apple-mail-mcp rebuild' to populate attachment\n"
+            "  metadata for existing emails. Without this, attachment\n"
+            "  search and get_attachment will only work for newly\n"
+            "  indexed emails.\n",
+            file=sys.stderr,
         )
 
     conn.execute("UPDATE schema_version SET version = ?", (to_version,))

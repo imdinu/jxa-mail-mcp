@@ -44,6 +44,16 @@ MAX_EMLX_SIZE = 25 * 1024 * 1024
 
 
 @dataclass
+class AttachmentInfo:
+    """Metadata for a single email attachment."""
+
+    filename: str
+    mime_type: str
+    file_size: int
+    content_id: str | None
+
+
+@dataclass
 class EmlxEmail:
     """Parsed email from .emlx file."""
 
@@ -53,6 +63,7 @@ class EmlxEmail:
     content: str
     date_received: str
     emlx_path: Path
+    attachments: list[AttachmentInfo] | None = None
 
 
 def find_mail_directory() -> Path:
@@ -302,6 +313,9 @@ def parse_emlx(path: Path) -> EmlxEmail | None:
         # Extract body text
         body = _extract_body_text(msg)
 
+        # Extract attachment metadata
+        attachments = _extract_attachments(msg)
+
         # Extract message ID from filename
         msg_id = int(path.stem)
 
@@ -312,9 +326,10 @@ def parse_emlx(path: Path) -> EmlxEmail | None:
             content=body,
             date_received=date_received,
             emlx_path=path,
+            attachments=attachments or None,
         )
 
-    except Exception:
+    except (OSError, ValueError, UnicodeDecodeError, LookupError):
         # Skip malformed files
         return None
 
@@ -396,27 +411,146 @@ def _strip_html(html: str) -> str:
 
         return text.strip()
 
-    except Exception:
+    except (TypeError, ValueError, RecursionError):
         # Fallback: return empty string if parsing fails entirely
         # This is safer than returning potentially malicious content
         return ""
 
 
-def scan_emlx_files(mail_dir: Path) -> Iterator[Path]:
+def _extract_attachments(
+    msg: email.message.Message,
+) -> list[AttachmentInfo]:
+    """
+    Extract attachment metadata from an email message.
+
+    Walks MIME parts and collects non-inline, non-text parts
+    (or inline parts with Content-ID, i.e. embedded images).
+
+    Args:
+        msg: Parsed email message
+
+    Returns:
+        List of AttachmentInfo with filename, mime_type, size, content_id
+    """
+    attachments: list[AttachmentInfo] = []
+
+    if not msg.is_multipart():
+        return attachments
+
+    for part in msg.walk():
+        content_type = part.get_content_type()
+        disposition = str(part.get("Content-Disposition") or "")
+
+        # Skip multipart containers and plain text/html body parts
+        if part.get_content_maintype() == "multipart":
+            continue
+        if content_type in ("text/plain", "text/html") and (
+            "attachment" not in disposition.lower()
+        ):
+            continue
+
+        filename = part.get_filename() or ""
+        if not filename and "attachment" not in disposition.lower():
+            # Skip parts with no filename that aren't marked as attachments
+            continue
+
+        payload = part.get_payload(decode=True)
+        file_size = len(payload) if payload else 0
+        content_id = part.get("Content-ID")
+        if content_id:
+            # Strip angle brackets: <cid123> → cid123
+            content_id = content_id.strip("<>")
+
+        attachments.append(
+            AttachmentInfo(
+                filename=filename,
+                mime_type=content_type,
+                file_size=file_size,
+                content_id=content_id,
+            )
+        )
+
+    return attachments
+
+
+def get_attachment_content(
+    emlx_path: Path, target_filename: str
+) -> tuple[bytes, str] | None:
+    """
+    Extract a specific attachment's content from an .emlx file.
+
+    Args:
+        emlx_path: Path to the .emlx file
+        target_filename: Filename of the attachment to extract
+
+    Returns:
+        (raw_bytes, mime_type) tuple, or None if not found
+    """
+    try:
+        if not emlx_path.exists():
+            return None
+        if emlx_path.stat().st_size > MAX_EMLX_SIZE:
+            return None
+
+        content = emlx_path.read_bytes()
+        newline_idx = content.find(b"\n")
+        if newline_idx == -1:
+            return None
+
+        byte_count = int(content[:newline_idx].strip())
+        mime_start = newline_idx + 1
+        mime_end = mime_start + byte_count
+        msg = email.message_from_bytes(content[mime_start:mime_end])
+
+        for part in msg.walk():
+            filename = part.get_filename() or ""
+            if filename == target_filename:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    return (payload, part.get_content_type())
+
+        return None
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def scan_emlx_files(
+    mail_dir: Path,
+    exclude_mailboxes: set[str] | None = None,
+) -> Iterator[Path]:
     """
     Find all .emlx files in the Mail directory.
 
     Args:
         mail_dir: Path to ~/Library/Mail/V10/
+        exclude_mailboxes: Mailbox names to skip (e.g. {"Drafts"}).
+            Uses APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES config if None.
 
     Yields:
         Paths to .emlx files
     """
+    if exclude_mailboxes is None:
+        from ..config import get_index_exclude_mailboxes
+
+        exclude_mailboxes = get_index_exclude_mailboxes()
+
     # .emlx files are in: account-uuid/mailbox.mbox/Data/x/y/Messages/
     for emlx_path in mail_dir.rglob("*.emlx"):
         # Skip partial downloads
         if ".partial.emlx" in emlx_path.name:
             continue
+
+        # Skip excluded mailboxes by checking .mbox dir name
+        if exclude_mailboxes:
+            parts = emlx_path.relative_to(mail_dir).parts
+            if len(parts) > 1:
+                mbox_dir = parts[1]
+                mbox_name = (
+                    mbox_dir[:-5] if mbox_dir.endswith(".mbox") else mbox_dir
+                )
+                if mbox_name in exclude_mailboxes:
+                    continue
+
         yield emlx_path
 
 
@@ -465,6 +599,7 @@ def scan_all_emails(mail_dir: Path) -> Iterator[dict]:
             "content": parsed.content,
             "date_received": meta.get("date_received") or parsed.date_received,
             "emlx_path": str(emlx_path),
+            "attachments": parsed.attachments or [],
         }
 
 

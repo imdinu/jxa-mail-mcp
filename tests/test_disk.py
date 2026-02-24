@@ -6,9 +6,11 @@ from pathlib import Path
 
 from apple_mail_mcp.index.disk import (
     MAX_EMLX_SIZE,
+    _extract_attachments,
     _extract_body_text,
     _infer_account_mailbox,
     _strip_html,
+    get_attachment_content,
     parse_emlx,
 )
 
@@ -190,3 +192,195 @@ class TestInferAccountMailbox:
         account, mailbox = _infer_account_mailbox(other_path, mail_dir)
         assert account == "Unknown"
         assert mailbox == "Unknown"
+
+
+class TestScanExcludesDrafts:
+    """Tests for S3: draft exclusion in disk scanning."""
+
+    def test_scan_excludes_drafts(self, tmp_path: Path):
+        from apple_mail_mcp.index.disk import scan_emlx_files
+
+        mail_dir = tmp_path / "V10"
+        # Create INBOX and Drafts mailboxes
+        inbox = mail_dir / "acc" / "INBOX.mbox" / "Data" / "Messages"
+        drafts = mail_dir / "acc" / "Drafts.mbox" / "Data" / "Messages"
+        inbox.mkdir(parents=True)
+        drafts.mkdir(parents=True)
+
+        (inbox / "1.emlx").write_bytes(b"test")
+        (drafts / "2.emlx").write_bytes(b"test")
+
+        # With default exclusion
+        files = list(scan_emlx_files(mail_dir, exclude_mailboxes={"Drafts"}))
+        assert len(files) == 1
+        assert "INBOX" in str(files[0])
+
+    def test_scan_no_exclusion(self, tmp_path: Path):
+        from apple_mail_mcp.index.disk import scan_emlx_files
+
+        mail_dir = tmp_path / "V10"
+        inbox = mail_dir / "acc" / "INBOX.mbox" / "Data" / "Messages"
+        drafts = mail_dir / "acc" / "Drafts.mbox" / "Data" / "Messages"
+        inbox.mkdir(parents=True)
+        drafts.mkdir(parents=True)
+
+        (inbox / "1.emlx").write_bytes(b"test")
+        (drafts / "2.emlx").write_bytes(b"test")
+
+        # With empty exclusion set
+        files = list(scan_emlx_files(mail_dir, exclude_mailboxes=set()))
+        assert len(files) == 2
+
+
+class TestExtractAttachments:
+    """Tests for attachment metadata extraction."""
+
+    def test_no_attachments_plain_text(self):
+        import email as email_mod
+
+        msg = email_mod.message_from_string(
+            "Content-Type: text/plain\n\nHello world"
+        )
+        result = _extract_attachments(msg)
+        assert result == []
+
+    def test_extracts_attachment_from_multipart(self):
+        import email as email_mod
+
+        raw = """\
+Content-Type: multipart/mixed; boundary="----=_Part"
+
+------=_Part
+Content-Type: text/plain
+
+Body text
+
+------=_Part
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="invoice.pdf"
+
+%PDF-fake-content
+
+------=_Part--
+"""
+        msg = email_mod.message_from_string(raw)
+        result = _extract_attachments(msg)
+        assert len(result) == 1
+        assert result[0].filename == "invoice.pdf"
+        assert result[0].mime_type == "application/pdf"
+        assert result[0].file_size > 0
+
+    def test_extracts_inline_image_with_content_id(self):
+        import email as email_mod
+
+        raw = """\
+Content-Type: multipart/related; boundary="----=_Part"
+
+------=_Part
+Content-Type: text/html
+
+<html><body><img src="cid:img1"></body></html>
+
+------=_Part
+Content-Type: image/png
+Content-ID: <img1>
+Content-Disposition: inline; filename="logo.png"
+
+PNG-fake-content
+
+------=_Part--
+"""
+        msg = email_mod.message_from_string(raw)
+        result = _extract_attachments(msg)
+        assert len(result) == 1
+        assert result[0].filename == "logo.png"
+        assert result[0].content_id == "img1"
+
+    def test_parse_emlx_populates_attachments(self, tmp_path):
+        mime_content = b"""\
+Content-Type: multipart/mixed; boundary="----=_Part"
+
+------=_Part
+Content-Type: text/plain
+
+Body text
+
+------=_Part
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="doc.pdf"
+
+%PDF-fake
+
+------=_Part--
+"""
+        byte_count = len(mime_content)
+        plist = b"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN">
+<plist version="1.0"><dict></dict></plist>
+"""
+        emlx = f"{byte_count}\n".encode() + mime_content + plist
+        path = tmp_path / "42.emlx"
+        path.write_bytes(emlx)
+
+        result = parse_emlx(path)
+        assert result is not None
+        assert result.attachments is not None
+        assert len(result.attachments) == 1
+        assert result.attachments[0].filename == "doc.pdf"
+
+
+class TestGetAttachmentContent:
+    """Tests for extracting attachment binary content."""
+
+    def test_extracts_attachment_bytes(self, tmp_path):
+        mime_content = b"""\
+Content-Type: multipart/mixed; boundary="----=_Part"
+
+------=_Part
+Content-Type: text/plain
+
+Body
+
+------=_Part
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="data.bin"
+
+BINARYDATA
+
+------=_Part--
+"""
+        byte_count = len(mime_content)
+        plist = b"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN">
+<plist version="1.0"><dict></dict></plist>
+"""
+        emlx = f"{byte_count}\n".encode() + mime_content + plist
+        path = tmp_path / "99.emlx"
+        path.write_bytes(emlx)
+
+        result = get_attachment_content(path, "data.bin")
+        assert result is not None
+        raw_bytes, mime_type = result
+        assert b"BINARYDATA" in raw_bytes
+        assert mime_type == "application/octet-stream"
+
+    def test_returns_none_for_missing_attachment(self, tmp_path):
+        mime_content = b"Content-Type: text/plain\n\nBody"
+        byte_count = len(mime_content)
+        plist = b"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN">
+<plist version="1.0"><dict></dict></plist>
+"""
+        emlx = f"{byte_count}\n".encode() + mime_content + plist
+        path = tmp_path / "100.emlx"
+        path.write_bytes(emlx)
+
+        result = get_attachment_content(path, "nonexistent.pdf")
+        assert result is None
+
+    def test_returns_none_for_missing_file(self, tmp_path):
+        result = get_attachment_content(tmp_path / "missing.emlx", "file.pdf")
+        assert result is None

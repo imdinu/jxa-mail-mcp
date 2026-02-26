@@ -793,6 +793,25 @@ EMBEDDEDDATA
         assert mime_type == "application/octet-stream"
 
 
+    def test_rejects_oversized_external(self, tmp_path: Path):
+        """External file exceeding MAX_EMLX_SIZE must be rejected (#47)."""
+        emlx = _build_partial_tree(
+            tmp_path,
+            filenames={2: "huge.bin"},
+            file_content=b"x" * 100,
+        )
+        # Patch MAX_EMLX_SIZE to a tiny value so we don't need 25 MB on disk
+        import apple_mail_mcp.index.disk as disk_mod
+
+        original = disk_mod.MAX_EMLX_SIZE
+        try:
+            disk_mod.MAX_EMLX_SIZE = 50
+            result = get_attachment_content(emlx, "huge.bin")
+            assert result is None
+        finally:
+            disk_mod.MAX_EMLX_SIZE = original
+
+
 class TestExtractAttachmentsExternalSize:
     """_extract_attachments gets size from disk for externals (#45)."""
 

@@ -743,6 +743,8 @@ def _read_external_attachment(
         return None
 
     try:
+        if ext_path.stat().st_size > MAX_EMLX_SIZE:
+            return None
         data = ext_path.read_bytes()
     except (OSError, PermissionError):
         return None

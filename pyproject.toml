@@ -1,6 +1,6 @@
 [project]
 name = "apple-mail-mcp"
-version = "0.1.4"
+version = "0.1.5"
 description = "Fast MCP server for Apple Mail with FTS5 search index"
 readme = "README.md"
 license = "GPL-3.0-or-later"

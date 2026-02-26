@@ -13,6 +13,19 @@ Apple Mail MCP is configured via environment variables. All settings have sensib
 | `APPLE_MAIL_INDEX_STALENESS_HOURS` | `24` | Hours before index is considered stale |
 | `APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES` | `Drafts` | Comma-separated mailboxes to skip in search |
 
+### Per-Mailbox Email Limit
+
+`APPLE_MAIL_INDEX_MAX_EMAILS` (default: 5,000) limits how many emails are indexed per mailbox. When a mailbox exceeds this limit, the most recent emails by file modification time are kept.
+
+This prevents the index from growing unbounded for large mailboxes. To index more:
+
+```bash
+export APPLE_MAIL_INDEX_MAX_EMAILS=10000
+apple-mail-mcp rebuild
+```
+
+The `rebuild` command will report how many mailboxes hit the cap. Use `apple-mail-mcp status` to check your current index size.
+
 ## MCP Client Configuration
 
 ### Claude Desktop

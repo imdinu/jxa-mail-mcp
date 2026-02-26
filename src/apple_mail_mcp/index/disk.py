@@ -25,6 +25,8 @@ Mail.app storage structure:
 from __future__ import annotations
 
 import email
+import logging
+import mimetypes
 import re
 import sqlite3
 import warnings
@@ -32,6 +34,8 @@ from dataclasses import dataclass
 from email.header import decode_header, make_header
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -333,7 +337,7 @@ def parse_emlx(path: Path) -> EmlxEmail | None:
         body = _extract_body_text(msg)
 
         # Extract attachment metadata
-        attachments = _extract_attachments(msg)
+        attachments = _extract_attachments(msg, emlx_path=path)
 
         # Extract message ID from filename (handles .partial.emlx)
         msg_id = extract_message_id(path)
@@ -480,31 +484,111 @@ def _estimate_attachment_size(part: email.message.Message) -> int:
         return len(raw)
 
 
+def _find_external_attachment(
+    emlx_path: Path,
+    msg_id: int,
+    part_idx: int,
+    filename: str,
+) -> Path | None:
+    """Find an externally-stored attachment on disk.
+
+    Apple Mail stores external attachments for ``.partial.emlx``
+    files in a sibling ``Attachments`` directory::
+
+        .../Data/9/4/Messages/49461.partial.emlx
+        .../Data/9/4/Attachments/49461/2/file.jpeg
+
+    Args:
+        emlx_path: Path to the ``.emlx`` file.
+        msg_id: Numeric message ID extracted from *emlx_path*.
+        part_idx: 1-based attachment part index (matches the
+            subdirectory name under ``Attachments/<msg_id>/``).
+        filename: Target filename to look for.
+
+    Returns:
+        Path to the external file, or ``None`` if not found.
+    """
+    # Navigate: Messages/ -> parent -> Attachments/<msg_id>/
+    attachments_dir = emlx_path.parent.parent / "Attachments" / str(msg_id)
+    if not attachments_dir.is_dir():
+        return None
+
+    # Part sub-directories are 1-based: 2/, 3/, 4/, …
+    # The part_idx we receive is already 1-based.
+    part_dir = attachments_dir / str(part_idx)
+    if not part_dir.is_dir():
+        return None
+
+    # Strategy 1: exact filename match
+    # Guard against path traversal from untrusted MIME filenames
+    # (e.g. filename="../../etc/passwd")
+    candidate = part_dir / filename
+    try:
+        if not candidate.resolve().is_relative_to(part_dir.resolve()):
+            return None
+    except (ValueError, OSError):
+        return None
+    if candidate.is_file():
+        return candidate
+
+    # Strategy 2: take the single file in the subdirectory
+    # (each part subdir has exactly one file, sometimes with
+    # a generic name like "Mail Attachment.jpeg").
+    try:
+        files = [f for f in part_dir.iterdir() if f.is_file()]
+    except OSError:
+        return None
+
+    if len(files) == 1:
+        return files[0]
+
+    return None
+
+
 def _extract_attachments(
     msg: email.message.Message,
+    *,
+    emlx_path: Path | None = None,
 ) -> list[AttachmentInfo]:
-    """
-    Extract attachment metadata from an email message.
+    """Extract attachment metadata from an email message.
 
     Walks MIME parts and collects non-inline, non-text parts
     (or inline parts with Content-ID, i.e. embedded images).
 
+    When *emlx_path* is provided and the estimated size is 0
+    (common for ``.partial.emlx`` with external attachments),
+    the function tries to stat the external file to get an
+    accurate size.
+
     Args:
         msg: Parsed email message
+        emlx_path: Optional path to the ``.emlx`` file on
+            disk, used to locate external attachments.
 
     Returns:
-        List of AttachmentInfo with filename, mime_type, size, content_id
+        List of AttachmentInfo with filename, mime_type,
+        size, content_id
     """
     attachments: list[AttachmentInfo] = []
 
     if not msg.is_multipart():
         return attachments
 
+    # Resolve msg_id once if we might need external lookup
+    msg_id: int | None = None
+    if emlx_path is not None:
+        try:
+            msg_id = extract_message_id(emlx_path)
+        except ValueError:
+            pass
+
+    attachment_part_idx = 0
+
     for part in msg.walk():
         content_type = part.get_content_type()
         disposition = str(part.get("Content-Disposition") or "")
 
-        # Skip multipart containers and plain text/html body parts
+        # Skip multipart containers and plain text/html body
         if part.get_content_maintype() == "multipart":
             continue
         if content_type in ("text/plain", "text/html") and (
@@ -514,10 +598,29 @@ def _extract_attachments(
 
         filename = part.get_filename() or ""
         if not filename and "attachment" not in disposition.lower():
-            # Skip parts with no filename that aren't marked as attachments
             continue
 
+        # 1-based index matching Attachments/ subdirs
+        attachment_part_idx += 1
+
         file_size = _estimate_attachment_size(part)
+
+        # Fallback: stat external file for .partial.emlx
+        if file_size == 0 and emlx_path is not None and msg_id is not None:
+            # Part subdirs start at 2 for the first
+            # attachment (1 is typically the body part)
+            ext = _find_external_attachment(
+                emlx_path,
+                msg_id,
+                attachment_part_idx + 1,
+                filename,
+            )
+            if ext is not None:
+                try:
+                    file_size = ext.stat().st_size
+                except OSError:
+                    pass
+
         content_id = part.get("Content-ID")
         if content_id:
             # Strip angle brackets: <cid123> → cid123
@@ -564,16 +667,92 @@ def get_attachment_content(
         mime_end = mime_start + byte_count
         msg = email.message_from_bytes(content[mime_start:mime_end])
 
+        # Walk MIME parts, tracking attachment index for
+        # external-file fallback.
+        attachment_part_idx = 0
         for part in msg.walk():
-            filename = part.get_filename() or ""
-            if filename == target_filename:
-                payload = part.get_payload(decode=True)
-                if payload:
-                    return (payload, part.get_content_type())
+            ct = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "")
+
+            if part.get_content_maintype() == "multipart":
+                continue
+            if ct in ("text/plain", "text/html") and (
+                "attachment" not in disp.lower()
+            ):
+                continue
+
+            fname = part.get_filename() or ""
+            if not fname and "attachment" not in disp.lower():
+                continue
+
+            attachment_part_idx += 1
+
+            if fname != target_filename:
+                continue
+
+            # Primary path: embedded MIME payload
+            payload = part.get_payload(decode=True)
+            if payload:
+                return (payload, ct)
+
+            # Fallback: external file on disk
+            result = _read_external_attachment(
+                emlx_path,
+                attachment_part_idx,
+                target_filename,
+            )
+            if result is not None:
+                return result
 
         return None
     except (OSError, ValueError, UnicodeDecodeError):
         return None
+
+
+def _read_external_attachment(
+    emlx_path: Path,
+    attachment_part_idx: int,
+    target_filename: str,
+) -> tuple[bytes, str] | None:
+    """Read an external attachment file from disk.
+
+    Helper for :func:`get_attachment_content` that locates
+    and reads the external file stored alongside a
+    ``.partial.emlx``.
+
+    Args:
+        emlx_path: Path to the ``.emlx`` file.
+        attachment_part_idx: 1-based attachment index.
+        target_filename: Filename to find.
+
+    Returns:
+        ``(bytes, mime_type)`` or ``None``.
+    """
+    try:
+        msg_id = extract_message_id(emlx_path)
+    except ValueError:
+        return None
+
+    ext_path = _find_external_attachment(
+        emlx_path,
+        msg_id,
+        attachment_part_idx + 1,
+        target_filename,
+    )
+    if ext_path is None:
+        return None
+
+    try:
+        if ext_path.stat().st_size > MAX_EMLX_SIZE:
+            return None
+        data = ext_path.read_bytes()
+    except (OSError, PermissionError):
+        return None
+
+    mime_type, _ = mimetypes.guess_type(ext_path.name)
+    if mime_type is None:
+        mime_type = "application/octet-stream"
+    return (data, mime_type)
 
 
 def scan_emlx_files(
@@ -634,7 +813,11 @@ def scan_all_emails(mail_dir: Path) -> Iterator[dict]:
 
     # Scan .emlx files and combine with metadata
     for emlx_path in scan_emlx_files(mail_dir):
-        parsed = parse_emlx(emlx_path)
+        try:
+            parsed = parse_emlx(emlx_path)
+        except Exception as e:
+            logger.warning("Skipping corrupt file %s: %s", emlx_path, e)
+            continue
         if not parsed:
             continue
 

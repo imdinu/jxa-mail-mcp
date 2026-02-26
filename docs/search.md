@@ -65,6 +65,9 @@ For each email, the index stores:
 
 Attachment metadata (filename, MIME type, file size) is stored in a separate `attachments` table, enabling `search(scope="attachments")` queries.
 
+!!! note
+    Body search (`scope="body"`) only covers indexed emails, which may be limited by the `APPLE_MAIL_INDEX_MAX_EMAILS` cap (default: 5,000 per mailbox). Subject and sender search (`scope="subject"`, `scope="sender"`) use live JXA queries against Mail.app and are not affected by this limit.
+
 ### Account UUIDs vs Friendly Names
 
 The `account` column stores filesystem UUIDs (e.g., `24E569DF-5E45-...`), not friendly names like `"Work"`. This is intentional — the sync engine diffs `get_disk_inventory()` (UUID-keyed) against `get_db_inventory()` to detect new, deleted, and moved emails. Storing friendly names would break the diff, causing a full re-index on every sync cycle.

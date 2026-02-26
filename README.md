@@ -68,6 +68,7 @@ apple-mail-mcp index --verbose
 | `APPLE_MAIL_DEFAULT_ACCOUNT` | First account | Default email account |
 | `APPLE_MAIL_DEFAULT_MAILBOX` | `INBOX` | Default mailbox |
 | `APPLE_MAIL_INDEX_PATH` | `~/.apple-mail-mcp/index.db` | Index location |
+| `APPLE_MAIL_INDEX_MAX_EMAILS` | `5000` | Max emails indexed per mailbox |
 | `APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES` | `Drafts` | Mailboxes to skip in search |
 
 ```json
@@ -83,6 +84,18 @@ apple-mail-mcp index --verbose
   }
 }
 ```
+
+## Migrating from apple-mcp?
+
+If you used [supermemoryai/apple-mcp](https://github.com/supermemoryai/apple-mcp) (archived January 2026), apple-mail-mcp is a maintained alternative for the **Mail portion** specifically. Notes, Messages, Contacts, Calendar, and Reminders are out of scope.
+
+| apple-mcp (`mail` tool, action) | apple-mail-mcp |
+|----------------------------------|----------------|
+| `read_emails` | `get_emails(filter?, limit?)` + `get_email(message_id)` |
+| `search_emails` | `search(query, scope?)` — 5 scopes: all, subject, sender, body, attachments |
+| `send_email` | Not yet supported (planned) |
+
+**What's different:** available on PyPI (`pipx install apple-mail-mcp`), 87x faster email fetching via batch JXA, FTS5 search index for ~2ms body search, and disk-based sync that avoids the JXA timeouts and false-success responses.
 
 ## Development
 
